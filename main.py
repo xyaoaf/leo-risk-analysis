@@ -261,8 +261,8 @@ def _plot_near_panel(fig, gs_pos, result, ext_fn, hillshade_norm, canopy_cmap, l
     n_tot = len(gdf) if gdf is not None else 0
     n_blk = int(gdf["blocked"].sum()) if (gdf is not None and n_tot) else 0
     legend_h = [
-        mpatches.Patch(fc="#e74c3c", ec="w", alpha=.7, label=f"Usable ({n_tot-n_blk})"),
-        mpatches.Patch(fc="#7f8c8d", ec="w", alpha=.7, label=f"Blocked ({n_blk})"),
+        mpatches.Patch(fc="#3b82f6", ec="w", alpha=.7, label=f"Usable ({n_tot-n_blk})"),
+        mpatches.Patch(fc="#f59e0b", ec="w", alpha=.7, label=f"Blocked ({n_blk})"),
         mpatches.Patch(fc="#52b788", ec="none", alpha=.7, label="Canopy"),
     ]
     ax.legend(handles=legend_h, loc="lower right", fontsize=6,
@@ -448,8 +448,8 @@ def _plot_summary(results: list, out_path: Path):
 def _draw_buildings(ax, gdf, alpha=0.65):
     if gdf is None or len(gdf) == 0:
         return
-    for color, subset in [("#e74c3c", gdf[~gdf["blocked"]]),
-                           ("#7f8c8d",  gdf[ gdf["blocked"]])]:
+    for color, subset in [("#3b82f6", gdf[~gdf["blocked"]]),
+                           ("#f59e0b",  gdf[ gdf["blocked"]])]:
         patches = []
         for _, row in subset.iterrows():
             geom = row.geometry

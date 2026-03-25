@@ -78,6 +78,10 @@ _R_NEAR  = 100
 _N_AZ    = 72
 _LOCAL_SEARCH_RADIUS = 50     # metres
 
+# Local search distance penalty: each metre of displacement adds this many
+# risk points to the candidate objective, so nearby fixes are preferred.
+_SEARCH_LAMBDA = 0.3   # risk pts / metre
+
 
 # ===========================================================================
 # Main entry point
@@ -149,9 +153,16 @@ def analyze_location(
     if on_building and bldg_row is not None:
         bldg_h = float(bldg_row["height_m"])
         if bool(bldg_row["blocked"]):
-            roof_usable_flag = False
-            h_dish = S_terrain[cy, cx] + dish_height          # ground level
-            warnings.append("On-building location has vegetation overhang (roof unusable).")
+            # Change F: surface as degraded candidate — still mount on roof so
+            # the horizon analysis captures the actual sky view from rooftop.
+            # The canopy overhang will naturally raise the obstruction surface
+            # and appear in the risk score; don't hard-fail here.
+            roof_usable_flag = False    # flagged for reporting only
+            h_dish = S_terrain[cy, cx] + bldg_h + dish_height
+            warnings.append(
+                "On-building location has vegetation overhang (roof degraded — "
+                "canopy constraints may fail)."
+            )
         else:
             h_dish = S_terrain[cy, cx] + bldg_h + dish_height
     else:
@@ -209,15 +220,20 @@ def analyze_location(
         on_building, roof_usable_flag,
         canopy["simulated"],
     )
-    feasible = all(C[k]["pass"] for k in C)
+    feasible     = all(C[k]["pass"] for k in C)
+    failure_mode = _classify_failure_mode(C)
 
     # ── 8. Classification & risk score ─────────────────────────────────────
     classification = classify_obstruction(hz_far, hz_canopy, hz_full, n_az)
     risk           = score_risk(classification)
 
     # ── 9. Optional local search ────────────────────────────────────────────
+    # Change B: skip local search when far-field terrain is the dominant cause —
+    # moving 50 m within the same terrain bowl cannot escape a regional blocker.
     best_nearby = None
-    if run_local_search and (not feasible or risk["risk_score"] > 20):
+    if (run_local_search
+            and failure_mode != "regional_terrain"
+            and (not feasible or risk["risk_score"] > 20)):
         try:
             best_nearby = find_better_nearby(
                 lat, lon,
@@ -242,6 +258,7 @@ def analyze_location(
         "lat":             lat,
         "lon":             lon,
         "feasible":        feasible,
+        "failure_mode":    failure_mode,
         "on_building":     on_building,
         "dish_height_asl_m": round(h_dish, 1),
         "constraints":     C,
@@ -290,7 +307,7 @@ def find_better_nearby(
     dish_height: float = DISH_HEIGHT_M,
     n_az: int = _N_AZ,
     radius_m: float = _LOCAL_SEARCH_RADIUS,
-    strategy: str = "ring",
+    strategy: str = "two_scale",
 ) -> dict:
     """
     Search for a better installation point within radius_m of (lat, lon).
@@ -307,7 +324,9 @@ def find_better_nearby(
     dish_height: default mount height
     n_az       : azimuth count
     radius_m   : search radius (should be ≤ near-field radius to reuse tiles)
-    strategy   : "ring" (26 pts) | "grid" (dense, ~78 pts at 10 m step)
+    strategy   : "two_scale" (dense 10–15 m + coarse 30–50 m, default)
+                 "ring"      (26 pts at 0.3×/0.6×/1.0× radius)
+                 "grid"      (dense ~78 pts at 10 m step)
 
     Returns
     -------
@@ -330,12 +349,10 @@ def find_better_nearby(
         cy0, cx0, nrows, ncols, dish_height, n_az,
     )
 
-    # Sample candidates
+    # Sample candidates (Change D: two_scale is now the default)
     candidates_latlon = _sample_candidates(lat, lon, radius_m, strategy)
 
     w, s, e, n_b = bbox_near
-    lat_deg_per_m = 1.0 / 111_320.0
-    lon_deg_per_m = 1.0 / (111_320.0 * np.cos(np.radians(lat)))
     dy_m_px = (n_b - s) / nrows
     dx_m_px = (e   - w) / ncols
 
@@ -355,6 +372,8 @@ def find_better_nearby(
             far_arr, far_bbox,
             cy_c, cx_c, nrows, ncols, dish_height, n_az,
         )
+        # Attach distance for penalty ranking
+        r["distance_m"] = round(_haversine_m(lat, lon, c_lat, c_lon), 1)
         results.append(r)
 
     if not results:
@@ -366,11 +385,15 @@ def find_better_nearby(
             "candidates": [],
         }
 
-    # Rank: feasible first, then ascending risk
-    results.sort(key=lambda r: (not r["feasible"], r["risk_score"]))
+    # Change C: rank by objective = risk_score + λ × distance_m
+    # Feasible candidates still come before infeasible ones.
+    results.sort(key=lambda r: (
+        not r["feasible"],
+        r["risk_score"] + _SEARCH_LAMBDA * r["distance_m"],
+    ))
     best = results[0]
 
-    dist_m = _haversine_m(lat, lon, best["lat"], best["lon"])
+    dist_m = best.get("distance_m", _haversine_m(lat, lon, best["lat"], best["lon"]))
     improvement = {
         "risk_delta":      round(origin_result["risk_score"] - best["risk_score"], 1),
         "feasible_gained": (not origin_result["feasible"]) and best["feasible"],
@@ -539,6 +562,38 @@ def _evaluate_constraints(
     }
 
 
+def _classify_failure_mode(C: dict) -> str:
+    """
+    Classify the primary reason a location is infeasible (or 'feasible').
+
+    Returns one of:
+      feasible         — all constraints pass
+      regional_terrain — C_terrain_large fails (far-field horizon blocks FOV)
+      local_terrain    — C_terrain_small fails (slope too steep)
+      local_canopy     — C_veg_at_point or C_vegetation fails
+      local_building   — C_building_nearby fails
+      roof_unusable    — C_roof_usable fails (on-building vegetation overhang)
+      mixed            — two or more constraints fail
+    """
+    failed = [k for k, v in C.items() if not v["pass"]]
+    if not failed:
+        return "feasible"
+    if len(failed) > 1:
+        return "mixed"
+    f = failed[0]
+    if f == "C_terrain_large":
+        return "regional_terrain"
+    if f == "C_terrain_small":
+        return "local_terrain"
+    if f in ("C_veg_at_point", "C_vegetation"):
+        return "local_canopy"
+    if f == "C_building_nearby":
+        return "local_building"
+    if f == "C_roof_usable":
+        return "roof_unusable"
+    return "unknown"
+
+
 def _point_in_footprint(
     lat: float,
     lon: float,
@@ -572,7 +627,30 @@ def _sample_candidates(
 
     candidates = []
 
-    if strategy == "ring":
+    if strategy == "two_scale":
+        # Change D: dense inner ring (tree-crown escape, ~10–15 m) +
+        #           coarser outer ring (different patch, ~30–50 m).
+        # Inner: 3 rings × 8 pts = 24 candidates
+        for r_m, n in [(10, 8), (12, 8), (15, 8)]:
+            for i in range(n):
+                theta = 2 * np.pi * i / n
+                candidates.append((
+                    lat + r_m * np.cos(theta) * lat_deg,
+                    lon + r_m * np.sin(theta) * lon_deg,
+                ))
+        # Outer: 3 rings × 12 pts = 36 candidates (capped to radius_m)
+        outer_radii = [30, 40, min(50, radius_m)]
+        for r_m in outer_radii:
+            if r_m > radius_m:
+                continue
+            for i in range(12):
+                theta = 2 * np.pi * i / 12
+                candidates.append((
+                    lat + r_m * np.cos(theta) * lat_deg,
+                    lon + r_m * np.sin(theta) * lon_deg,
+                ))
+
+    elif strategy == "ring":
         rings   = [0.3, 0.6, 1.0]
         n_per   = [6,   8,   12]
         for ring_frac, n in zip(rings, n_per):
