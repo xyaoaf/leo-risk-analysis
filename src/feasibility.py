@@ -1,0 +1,624 @@
+"""
+feasibility.py — Full Starlink installation feasibility analysis.
+
+Entry point
+-----------
+    result = analyze_location(lat, lon)
+
+Returns a structured dict conforming to the output schema in docs/DESIGN.md:
+  feasible          bool
+  on_building       bool
+  dish_height_asl_m float
+  constraints       dict of {pass, …} per constraint
+  horizon           dict of profile arrays
+  classification    dict (dominant, contributions, …)
+  risk              dict (score, tier, components, explanation)
+  best_nearby       dict or None
+  warnings          list[str]
+  data_sources      dict
+  elapsed_s         float
+
+Design rules (see docs/DESIGN.md §8)
+---------------------------------------
+  feasible = C_terrain_large  (≤10% FOV blocked by far terrain)
+         AND C_terrain_small  (local slope < 20°)
+         AND C_veg_at_point   (canopy height at dish < 1 m)
+         AND C_vegetation     (≤15% FOV blocked by canopy)
+         AND C_building_nearby(≤5% FOV blocked by buildings)
+         AND C_roof_usable    (only if on_building)
+
+All constraints are logical AND — a single failure → infeasible.
+Risk score is continuous even for feasible locations.
+"""
+
+from __future__ import annotations
+
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+# Ensure src/ is on path when called directly
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from tools.terrain   import fetch_terrain
+from tools.canopy    import fetch_canopy
+from tools.buildings import fetch_buildings
+from tools.surface   import build_obstruction_surface
+from tools.horizon   import (
+    compute_horizon_profile,
+    compute_local_slope,
+    classify_obstruction,
+    evaluate_blockage,
+    fov_mask,
+    DISH_HEIGHT_M,
+    SKY_THRESHOLD_DEG,
+)
+from scoring import score_risk
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constraint thresholds
+# ---------------------------------------------------------------------------
+_C_TERRAIN_LARGE_TOL  = 0.10   # ≤10% of FOV azimuths blocked by terrain
+_C_VEGETATION_TOL     = 0.15   # ≤15% (seasonal)
+_C_BUILDING_TOL       = 0.05   # ≤5%  (permanent)
+_C_SLOPE_MAX_DEG      = 20.0   # standard ground mount limit
+_C_CANOPY_AT_DISH_HI  = 1.0    # m — high-res canopy (<5 m/px): individual tree detectable
+_C_CANOPY_AT_DISH_LO  = 8.0    # m — coarse canopy (≥5 m/px): pixel covers ~30m×30m area;
+                                #     only flag if clearly dense forest (>8 m)
+
+# Default analysis parameters
+_R_FAR   = 1500
+_R_NEAR  = 100
+_N_AZ    = 72
+_LOCAL_SEARCH_RADIUS = 50     # metres
+
+
+# ===========================================================================
+# Main entry point
+# ===========================================================================
+
+def analyze_location(
+    lat: float,
+    lon: float,
+    radius_near: int   = _R_NEAR,
+    radius_far:  int   = _R_FAR,
+    dish_height: float = DISH_HEIGHT_M,
+    n_az:        int   = _N_AZ,
+    run_local_search: bool = True,
+    local_search_radius: int = _LOCAL_SEARCH_RADIUS,
+) -> dict:
+    """
+    Full Starlink installation feasibility analysis for a single location.
+
+    Parameters
+    ----------
+    lat, lon             : WGS84 decimal degrees
+    radius_near          : near-field analysis radius in metres (canopy/buildings)
+    radius_far           : far-field terrain horizon radius in metres
+    dish_height          : dish mount height above ground or rooftop (metres)
+    n_az                 : number of azimuth samples (72 = every 5°)
+    run_local_search     : if True and location is infeasible or risk > 20,
+                           run find_better_nearby automatically
+    local_search_radius  : search radius for find_better_nearby (metres)
+
+    Returns
+    -------
+    dict — see module docstring for schema
+    """
+    t0       = time.time()
+    warnings = []
+
+    # ── 1. Data fetch ───────────────────────────────────────────────────────
+    logger.info(f"[feasibility] analyze_location({lat:.5f}, {lon:.5f})")
+
+    terrain_far  = fetch_terrain(lat, lon, radius_m=radius_far,  resolution_hint=10)
+    terrain_near = fetch_terrain(lat, lon, radius_m=radius_near, resolution_hint=1)
+    canopy       = fetch_canopy( lat, lon, radius_m=radius_near)
+    buildings    = fetch_buildings(lat, lon, radius_m=radius_near)
+
+    if canopy["simulated"]:
+        warnings.append("Canopy data is SIMULATED — vegetation results are estimates.")
+
+    if buildings["count"] == 0:
+        warnings.append(
+            "No buildings detected in the analysis area. "
+            "If structures are present, blockage may be underestimated."
+        )
+
+    # ── 2. Surface composition ──────────────────────────────────────────────
+    surf = build_obstruction_surface(terrain_near, canopy, buildings)
+
+    S_full    = surf["surface"]
+    S_canopy  = surf["terrain"] + surf["canopy_resampled"]
+    S_terrain = surf["terrain"]
+    bbox_near = surf["bbox"]
+    res_m     = surf["resolution"]
+    nrows, ncols = S_full.shape
+    cy, cx = nrows // 2, ncols // 2
+
+    # ── 3. On-building check & dish elevation ───────────────────────────────
+    on_building, bldg_row = _point_in_footprint(lat, lon, surf["gdf_classified"])
+    roof_usable_flag      = True
+
+    if on_building and bldg_row is not None:
+        bldg_h = float(bldg_row["height_m"])
+        if bool(bldg_row["blocked"]):
+            roof_usable_flag = False
+            h_dish = S_terrain[cy, cx] + dish_height          # ground level
+            warnings.append("On-building location has vegetation overhang (roof unusable).")
+        else:
+            h_dish = S_terrain[cy, cx] + bldg_h + dish_height
+    else:
+        h_dish = S_terrain[cy, cx] + dish_height
+
+    # Check for NaN at dish location
+    if np.isnan(h_dish):
+        med = float(np.nanmedian(S_terrain))
+        h_dish = med + dish_height
+        warnings.append("DEM NaN at dish pixel — using median elevation.")
+
+    # ── 4. Slope check ──────────────────────────────────────────────────────
+    slope_deg = compute_local_slope(S_terrain, cy, cx, res_m)
+
+    # ── 4b. Resolution-aware canopy-at-dish threshold ──────────────────────
+    # At 27 m/px one pixel covers ~800 m²; a >1 m canopy value doesn't mean the
+    # specific dish point has a tree. Use the coarse threshold unless resolution
+    # is good enough (<5 m/px) to identify individual trees.
+    canopy_res_m = canopy.get("resolution", 30.0)
+    canopy_at_dish_threshold = (
+        _C_CANOPY_AT_DISH_HI if canopy_res_m < 5.0 else _C_CANOPY_AT_DISH_LO
+    )
+
+    # ── 5. Horizon profiles ─────────────────────────────────────────────────
+    hz_far     = compute_horizon_profile(
+        terrain_far["array"], terrain_far["bbox"],
+        n_az, h_dish_override=h_dish
+    )
+    hz_terrain = compute_horizon_profile(
+        S_terrain, bbox_near, n_az, h_dish_override=h_dish
+    )
+    hz_canopy  = compute_horizon_profile(
+        S_canopy, bbox_near, n_az, h_dish_override=h_dish
+    )
+    hz_full    = compute_horizon_profile(
+        S_full, bbox_near, n_az, h_dish_override=h_dish
+    )
+
+    # ── 6. Blockage evaluation ──────────────────────────────────────────────
+    fov = fov_mask(n_az)
+    blk_far  = evaluate_blockage(hz_far,    fov)
+    blk_can  = evaluate_blockage(hz_canopy, fov)
+    blk_full = evaluate_blockage(hz_full,   fov)
+
+    # Canopy contribution relative to terrain baseline
+    canopy_contrib_frac = max(0.0, blk_can["blocked_frac"] - evaluate_blockage(hz_terrain, fov)["blocked_frac"])
+
+    # ── 7. Constraint logic ─────────────────────────────────────────────────
+    C = _evaluate_constraints(
+        blk_far, blk_can, blk_full,
+        canopy_contrib_frac,
+        slope_deg,
+        S_canopy[cy, cx] - S_terrain[cy, cx],   # canopy height at dish
+        canopy_at_dish_threshold,
+        on_building, roof_usable_flag,
+        canopy["simulated"],
+    )
+    feasible = all(C[k]["pass"] for k in C)
+
+    # ── 8. Classification & risk score ─────────────────────────────────────
+    classification = classify_obstruction(hz_far, hz_canopy, hz_full, n_az)
+    risk           = score_risk(classification)
+
+    # ── 9. Optional local search ────────────────────────────────────────────
+    best_nearby = None
+    if run_local_search and (not feasible or risk["risk_score"] > 20):
+        try:
+            best_nearby = find_better_nearby(
+                lat, lon,
+                tiles=(S_full, S_canopy, S_terrain, bbox_near,
+                       terrain_far["array"], terrain_far["bbox"]),
+                dish_height=dish_height,
+                n_az=n_az,
+                radius_m=local_search_radius,
+            )
+        except Exception as exc:
+            logger.warning(f"[feasibility] Local search failed: {exc}")
+            warnings.append(f"Local search failed: {exc}")
+
+    elapsed = time.time() - t0
+    logger.info(
+        f"[feasibility] done | feasible={feasible}  "
+        f"risk={risk['risk_score']:.1f} [{risk['risk_tier']}]  "
+        f"dominant={classification['dominant']}  elapsed={elapsed:.1f}s"
+    )
+
+    return {
+        "lat":             lat,
+        "lon":             lon,
+        "feasible":        feasible,
+        "on_building":     on_building,
+        "dish_height_asl_m": round(h_dish, 1),
+        "constraints":     C,
+        "horizon": {
+            "n_azimuths":    n_az,
+            "fov_center_deg": 0.0,
+            "fov_half_deg":  50.0,
+            "terrain_far":   hz_far.tolist(),
+            "canopy":        hz_canopy.tolist(),
+            "full":          hz_full.tolist(),
+        },
+        "classification":  {k: v for k, v in classification.items()
+                            if not isinstance(v, np.ndarray)},
+        "risk":            risk,
+        "slope_deg":       round(slope_deg, 1),
+        "best_nearby":     best_nearby,
+        "warnings":        warnings,
+        # ── Raw arrays for visualisation (underscore prefix → skipped by JSON serialiser)
+        "_terrain_far_array": terrain_far["array"],
+        "_terrain_far_bbox":  terrain_far["bbox"],
+        "_surf_terrain":      S_terrain,
+        "_surf_canopy":       surf["canopy_resampled"],
+        "_surf_bbox":         bbox_near,
+        "_gdf_classified":    surf["gdf_classified"],
+        "data_sources": {
+            "terrain_far":  terrain_far["source"],
+            "terrain_near": terrain_near["source"],
+            "canopy":       canopy["source"],
+            "buildings":    buildings["source"],
+        },
+        "building_count":  buildings["count"],
+        "canopy_max_m":    round(float(canopy["array"].max()), 1),
+        "canopy_simulated": canopy["simulated"],
+        "elapsed_s":       round(elapsed, 1),
+    }
+
+
+# ===========================================================================
+# Local search: find_better_nearby
+# ===========================================================================
+
+def find_better_nearby(
+    lat: float,
+    lon: float,
+    tiles: tuple,
+    dish_height: float = DISH_HEIGHT_M,
+    n_az: int = _N_AZ,
+    radius_m: float = _LOCAL_SEARCH_RADIUS,
+    strategy: str = "ring",
+) -> dict:
+    """
+    Search for a better installation point within radius_m of (lat, lon).
+
+    KEY OPTIMISATION: All candidates within 50 m of origin fall within the
+    already-fetched 100 m near-field bbox.  This function reuses the tile
+    data — no additional network requests.
+
+    Parameters
+    ----------
+    lat, lon   : origin point
+    tiles      : (S_full, S_canopy, S_terrain, bbox_near,
+                  terrain_far_array, terrain_far_bbox)
+    dish_height: default mount height
+    n_az       : azimuth count
+    radius_m   : search radius (should be ≤ near-field radius to reuse tiles)
+    strategy   : "ring" (26 pts) | "grid" (dense, ~78 pts at 10 m step)
+
+    Returns
+    -------
+    dict:
+        best            : lowest-risk candidate result dict
+        improvement     : delta risk, feasibility gain flag, distance
+        origin_score    : risk score at the origin
+        n_evaluated     : candidates successfully evaluated
+        candidates      : list of all candidate summaries
+    """
+    S_full, S_canopy, S_terrain, bbox_near, far_arr, far_bbox = tiles
+    nrows, ncols = S_full.shape
+    cy0, cx0 = nrows // 2, ncols // 2
+
+    # Origin risk (cheap — tile already in memory)
+    origin_result = _evaluate_candidate(
+        lat, lon, lat, lon,
+        S_full, S_canopy, S_terrain, bbox_near,
+        far_arr, far_bbox,
+        cy0, cx0, nrows, ncols, dish_height, n_az,
+    )
+
+    # Sample candidates
+    candidates_latlon = _sample_candidates(lat, lon, radius_m, strategy)
+
+    w, s, e, n_b = bbox_near
+    lat_deg_per_m = 1.0 / 111_320.0
+    lon_deg_per_m = 1.0 / (111_320.0 * np.cos(np.radians(lat)))
+    dy_m_px = (n_b - s) / nrows
+    dx_m_px = (e   - w) / ncols
+
+    results = []
+    for c_lat, c_lon in candidates_latlon:
+        # Convert lat/lon to pixel within pre-fetched bbox
+        cy_c = int(round((c_lat - s) / dy_m_px))
+        cx_c = int(round((c_lon - w) / dx_m_px))
+
+        # Skip if outside fetched area
+        if not (2 <= cy_c < nrows - 2 and 2 <= cx_c < ncols - 2):
+            continue
+
+        r = _evaluate_candidate(
+            c_lat, c_lon, lat, lon,
+            S_full, S_canopy, S_terrain, bbox_near,
+            far_arr, far_bbox,
+            cy_c, cx_c, nrows, ncols, dish_height, n_az,
+        )
+        results.append(r)
+
+    if not results:
+        return {
+            "best": None,
+            "improvement": None,
+            "origin_score": origin_result["risk_score"],
+            "n_evaluated": 0,
+            "candidates": [],
+        }
+
+    # Rank: feasible first, then ascending risk
+    results.sort(key=lambda r: (not r["feasible"], r["risk_score"]))
+    best = results[0]
+
+    dist_m = _haversine_m(lat, lon, best["lat"], best["lon"])
+    improvement = {
+        "risk_delta":      round(origin_result["risk_score"] - best["risk_score"], 1),
+        "feasible_gained": (not origin_result["feasible"]) and best["feasible"],
+        "distance_m":      round(dist_m, 1),
+        "dominant_change": origin_result["dominant"] != best["dominant"],
+        "explanation":     _explain_improvement(origin_result, best),
+    }
+
+    logger.info(
+        f"[feasibility] local_search | "
+        f"n_candidates={len(results)}  best_risk={best['risk_score']:.1f}  "
+        f"origin_risk={origin_result['risk_score']:.1f}  "
+        f"Δ={improvement['risk_delta']:.1f}  dist={dist_m:.0f}m"
+    )
+
+    return {
+        "best":         best,
+        "improvement":  improvement,
+        "origin_score": origin_result["risk_score"],
+        "n_evaluated":  len(results),
+        "candidates":   results,
+    }
+
+
+# ===========================================================================
+# Internal helpers
+# ===========================================================================
+
+def _evaluate_candidate(
+    c_lat, c_lon, origin_lat, origin_lon,
+    S_full, S_canopy, S_terrain, bbox_near,
+    far_arr, far_bbox,
+    cy_c, cx_c, nrows, ncols,
+    dish_height, n_az,
+) -> dict:
+    """Evaluate a single candidate point using pre-fetched tiles."""
+    h_dish = float(S_terrain[cy_c, cx_c]) + dish_height
+    if np.isnan(h_dish):
+        h_dish = float(np.nanmedian(S_terrain)) + dish_height
+
+    fov = fov_mask(n_az)
+
+    # Far-field terrain — use same array but shifted dish elevation
+    # (origin and candidate are close enough that far_arr centre is valid)
+    hz_far  = compute_horizon_profile(
+        far_arr, far_bbox, n_az,
+        h_dish_override=h_dish
+    )
+    hz_can  = compute_horizon_profile(
+        S_canopy, bbox_near, n_az,
+        center_yx=(cy_c, cx_c), h_dish_override=h_dish
+    )
+    hz_full = compute_horizon_profile(
+        S_full, bbox_near, n_az,
+        center_yx=(cy_c, cx_c), h_dish_override=h_dish
+    )
+
+    blk_far  = evaluate_blockage(hz_far,  fov)
+    blk_full = evaluate_blockage(hz_full, fov)
+    blk_can  = evaluate_blockage(hz_can,  fov)
+
+    slope_deg = compute_local_slope(
+        S_terrain, cy_c, cx_c,
+        (bbox_near[3] - bbox_near[1]) * 111_320 / nrows
+    )
+
+    canopy_at = float(S_canopy[cy_c, cx_c]) - float(S_terrain[cy_c, cx_c])
+
+    # Hard constraints (simplified — no on-building check for candidates;
+    # canopy at-point uses the coarse threshold since local search always uses
+    # the same 27m canopy tile as the origin analysis)
+    feasible = (
+        blk_far["blocked_frac"]  <= _C_TERRAIN_LARGE_TOL and
+        slope_deg                 <  _C_SLOPE_MAX_DEG and
+        canopy_at                 <  _C_CANOPY_AT_DISH_LO and
+        blk_can["blocked_frac"]  <= _C_VEGETATION_TOL and
+        blk_full["blocked_frac"] <= _C_BUILDING_TOL
+    )
+
+    cl = classify_obstruction(hz_far, hz_can, hz_full, n_az)
+    rk = score_risk(cl)
+
+    return {
+        "lat":        c_lat,
+        "lon":        c_lon,
+        "feasible":   feasible,
+        "risk_score": rk["risk_score"],
+        "risk_tier":  rk["risk_tier"],
+        "dominant":   cl["dominant"],
+        "max_angle_deg": blk_full["max_angle_deg"],
+        "blocked_frac":  blk_full["blocked_frac"],
+        "slope_deg":  round(slope_deg, 1),
+        "canopy_at_m": round(canopy_at, 1),
+    }
+
+
+def _evaluate_constraints(
+    blk_far: dict,
+    blk_canopy: dict,
+    blk_full: dict,
+    canopy_contrib_frac: float,
+    slope_deg: float,
+    canopy_at_dish_m: float,
+    canopy_at_dish_threshold: float,
+    on_building: bool,
+    roof_usable: bool,
+    canopy_simulated: bool,
+) -> dict:
+    """
+    Evaluate all hard constraints.  Returns dict[name → {pass, value, threshold, …}].
+    """
+    confidence = "low" if canopy_simulated else "high"
+
+    C_terrain_large = {
+        "pass":       blk_far["blocked_frac"] <= _C_TERRAIN_LARGE_TOL,
+        "blocked_frac": round(blk_far["blocked_frac"], 3),
+        "max_angle_deg": round(blk_far["max_angle_deg"], 1),
+        "threshold":  _C_TERRAIN_LARGE_TOL,
+        "description": "Far-field terrain horizon ≤ 10% of FOV blocked",
+    }
+    C_terrain_small = {
+        "pass":       slope_deg < _C_SLOPE_MAX_DEG,
+        "slope_deg":  round(slope_deg, 1),
+        "threshold":  _C_SLOPE_MAX_DEG,
+        "description": "Local slope < 20° (standard ground mount feasible)",
+    }
+    C_veg_at_point = {
+        "pass":       canopy_at_dish_m < canopy_at_dish_threshold,
+        "canopy_height_m": round(canopy_at_dish_m, 1),
+        "threshold":  canopy_at_dish_threshold,
+        "confidence": confidence,
+        "description": (
+            f"Canopy height at dish < {canopy_at_dish_threshold:.0f} m "
+            f"({'1m hi-res rule' if canopy_at_dish_threshold < 5 else '8m coarse-data rule'})"
+        ),
+    }
+    C_vegetation = {
+        "pass":       blk_canopy["blocked_frac"] <= _C_VEGETATION_TOL,
+        "blocked_frac": round(blk_canopy["blocked_frac"], 3),
+        "max_angle_deg": round(blk_canopy["max_angle_deg"], 1),
+        "threshold":  _C_VEGETATION_TOL,
+        "confidence": confidence,
+        "description": "Vegetation blocks ≤ 15% of FOV",
+    }
+    C_building_nearby = {
+        "pass":       blk_full["blocked_frac"] <= _C_BUILDING_TOL,
+        "blocked_frac": round(blk_full["blocked_frac"], 3),
+        "max_angle_deg": round(blk_full["max_angle_deg"], 1),
+        "threshold":  _C_BUILDING_TOL,
+        "description": "Nearby buildings block ≤ 5% of FOV",
+    }
+    C_roof_usable = {
+        "pass":       (not on_building) or roof_usable,
+        "applicable": on_building,
+        "roof_usable": roof_usable,
+        "description": "Rooftop free of vegetation overhang (if on building)",
+    }
+
+    return {
+        "C_terrain_large":   C_terrain_large,
+        "C_terrain_small":   C_terrain_small,
+        "C_veg_at_point":    C_veg_at_point,
+        "C_vegetation":      C_vegetation,
+        "C_building_nearby": C_building_nearby,
+        "C_roof_usable":     C_roof_usable,
+    }
+
+
+def _point_in_footprint(
+    lat: float,
+    lon: float,
+    gdf,
+) -> tuple[bool, Any]:
+    """
+    Check if (lat, lon) lies within any building footprint.
+
+    Returns
+    -------
+    (on_building: bool, row: pandas.Series or None)
+    """
+    if gdf is None or len(gdf) == 0:
+        return False, None
+
+    from shapely.geometry import Point
+    pt = Point(lon, lat)
+    for _, row in gdf.iterrows():
+        geom = row.geometry
+        if geom is not None and not geom.is_empty and geom.contains(pt):
+            return True, row
+    return False, None
+
+
+def _sample_candidates(
+    lat: float, lon: float, radius_m: float, strategy: str
+) -> list[tuple[float, float]]:
+    """Sample candidate lat/lon pairs within radius_m."""
+    lat_deg = 1.0 / 111_320.0
+    lon_deg = 1.0 / (111_320.0 * np.cos(np.radians(lat)))
+
+    candidates = []
+
+    if strategy == "ring":
+        rings   = [0.3, 0.6, 1.0]
+        n_per   = [6,   8,   12]
+        for ring_frac, n in zip(rings, n_per):
+            r = radius_m * ring_frac
+            for i in range(n):
+                theta = 2 * np.pi * i / n
+                candidates.append((
+                    lat + r * np.cos(theta) * lat_deg,
+                    lon + r * np.sin(theta) * lon_deg,
+                ))
+
+    elif strategy == "grid":
+        step_m = 10.0
+        steps  = np.arange(-radius_m, radius_m + step_m, step_m)
+        for dy in steps:
+            for dx in steps:
+                if dx**2 + dy**2 <= radius_m**2:
+                    candidates.append((
+                        lat + dy * lat_deg,
+                        lon + dx * lon_deg,
+                    ))
+
+    return candidates
+
+
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    """Distance in metres between two WGS84 points."""
+    R   = 6_371_000.0
+    dlat = np.radians(lat2 - lat1)
+    dlon = np.radians(lon2 - lon1)
+    a   = (np.sin(dlat / 2) ** 2
+           + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2))
+           * np.sin(dlon / 2) ** 2)
+    return R * 2 * np.arcsin(np.sqrt(a))
+
+
+def _explain_improvement(origin: dict, best: dict) -> str:
+    dr = origin["risk_score"] - best["risk_score"]
+    if dr <= 0:
+        return "No improvement found nearby."
+    parts = [f"Moving {_haversine_m(origin['lat'], origin['lon'], best['lat'], best['lon']):.0f} m "
+             f"reduces risk by {dr:.0f} points ({origin['risk_score']:.0f} → {best['risk_score']:.0f})."]
+    if best["dominant"] != origin["dominant"]:
+        parts.append(
+            f"Dominant obstruction changes from {origin['dominant']} to {best['dominant']}."
+        )
+    if (not origin["feasible"]) and best["feasible"]:
+        parts.append("Location becomes feasible.")
+    return " ".join(parts)

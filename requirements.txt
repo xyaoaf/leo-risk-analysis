@@ -1,0 +1,7 @@
+py3dep>=0.19.0
+rasterio>=1.4.0
+numpy>=2.0
+matplotlib>=3.8
+pyproj>=3.6
+requests>=2.32
+Pillow>=10.0

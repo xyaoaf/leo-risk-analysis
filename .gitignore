@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+env/
+
+# Data — downloaded tile caches (auto-regenerated at runtime)
+data/buildings/*
+data/tiles/*
+data/boundaries/*
+!data/buildings/.gitkeep
+!data/tiles/.gitkeep
+!data/boundaries/.gitkeep
+
+# Runtime cache
+cache/*
+!cache/.gitkeep
+
+# Outputs — generated figures and JSON results
+outputs/*
+!outputs/.gitkeep
+
+# Dataset — proprietary / large input files
+DATA_CHALLENGE_50.csv
+*.csv
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDEs
+.vscode/
+.idea/
+*.swp
