@@ -204,10 +204,47 @@ at 20°N it becomes more equatorial.
 ## Results (NC Dataset — DATA_CHALLENGE_50)
 
 The provided dataset contains **4,674,917 NC addresses** across all 100 NC counties
-(FIPS 37xxx). A stratified sample of ~5 points per county (~500 total) was analyzed
+(FIPS 37xxx). A stratified sample of ~6 points per county (**594 total**) was analyzed
 to produce state-wide risk statistics. Full results in `outputs/batch/`.
 
-**8-point validation sample** (geographically spread across NC):
+### State-wide Summary (594 points, all 100 counties)
+
+| Metric | Value |
+|---|---|
+| Feasible locations | 240 / 594 (40.4%) |
+| Infeasible locations | 354 / 594 (59.6%) |
+| Critical-risk tier | 217 (36.5%) |
+| High-risk tier | 36 (6.1%) |
+| Moderate-risk tier | 37 (6.2%) |
+| Low-risk tier | 304 (51.2%) |
+| Mean risk score | 38.1 / 100 |
+| Dominant: vegetation | 296 (49.8%) |
+| Dominant: clear sky | 282 (47.5%) |
+| Dominant: buildings | 12 (2.0%) |
+| Dominant: terrain | 4 (0.7%) |
+
+**Key finding**: NC shows a bimodal distribution — locations are either heavily wooded
+(canopy-dominant, critical-tier) or open (clear-sky, low-tier). The piedmont and mountain
+counties (western NC) dominate the critical tier due to dense deciduous/mixed canopy at
+20–28 m. The coastal plain counties (eastern NC, lower elevation, pine flatwoods) show
+predominantly low risk with high feasibility rates.
+
+**Highest-risk counties** (mean score >75): McDowell (37111, 86.0), Watauga (37193, 83.8),
+Avery (37039, 80.1), Person (37075, 79.2), Buncombe (37021, 75.4) — all western mountain
+or forested piedmont counties.
+
+**Lowest-risk counties** (mean score = 0, 100% feasible): Brunswick (37019), Currituck
+(37029), Onslow (37133), Tyrrell (37177), Camden (37029) — coastal plain / sandhills.
+
+### Zonal Aggregation
+
+| Level | Units | Output file |
+|---|---|---|
+| Census block group | 570 | `outputs/zonal/block_group_summary.csv` |
+| Census tract | 504 | `outputs/zonal/tract_summary.csv` |
+| County | 100 | `outputs/zonal/county_summary.csv` |
+
+### 8-point Validation Sample
 
 | Location | Risk Score | Tier | Dominant | Canopy Max |
 |---|---|---|---|---|

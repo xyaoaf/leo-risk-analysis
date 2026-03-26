@@ -22,13 +22,31 @@ data/boundaries/*
 cache/*
 !cache/.gitkeep
 
-# Outputs — generated figures and JSON results
+# Outputs — large per-point files not tracked; selected results ARE tracked.
+# Pattern: negate the subdirectory first, then exclude files within it.
 outputs/*
 !outputs/.gitkeep
+!outputs/nc_risk_map.html
+!outputs/batch
+!outputs/zonal
+outputs/batch/*
+outputs/zonal/*
+!outputs/batch/batch_results.csv
+!outputs/batch/batch_county_summary.csv
+!outputs/batch/batch_sample_points.csv
+!outputs/batch/map_county_risk.png
+!outputs/batch/map_risk_scatter.png
+!outputs/batch/chart_tier_dist.png
+!outputs/zonal/block_group_summary.csv
+!outputs/zonal/tract_summary.csv
+!outputs/zonal/county_summary.csv
+!outputs/zonal/county_choropleth.png
+# Per-point report dirs and incremental CSV stay excluded (large / ephemeral)
+outputs/reports/
+outputs/batch/batch_results_incremental.csv
 
 # Dataset — proprietary / large input files
 DATA_CHALLENGE_50.csv
-*.csv
 
 # macOS
 .DS_Store
