@@ -54,9 +54,13 @@ def fetch_terrain(lat: float, lon: float, radius_m: float = 500, resolution_hint
         f"radius={radius_m}m hint={resolution_hint}m"
     )
 
-    # Start from resolution_hint; fall back to coarser if unavailable
-    # Each resolution is attempted up to MAX_ATTEMPTS times (transient 3DEP timeouts)
-    MAX_ATTEMPTS = 2
+    # Start from resolution_hint; fall back to coarser if unavailable.
+    # Each resolution is attempted up to MAX_ATTEMPTS times with exponential
+    # backoff to handle transient 3DEP WMS rate-limiting (HTTP 429/503).
+    # In concurrent batch runs the 3DEP endpoint rejects bursts; backoff gives
+    # the server time to recover before retrying or trying a coarser resolution.
+    MAX_ATTEMPTS = 4
+    _BACKOFF_BASE = 5  # seconds; doubles on each retry: 5, 10, 20s
     start_idx = next((i for i, r in enumerate(_LADDER) if r >= resolution_hint), 0)
     for resolution in _LADDER[start_idx:]:
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -90,13 +94,15 @@ def fetch_terrain(lat: float, lon: float, radius_m: float = 500, resolution_hint
                     "nodata": nodata,
                 }
             except Exception as e:
+                sleep_s = _BACKOFF_BASE * (2 ** (attempt - 1))  # 5, 10, 20, 40s
                 logger.warning(
                     f"[terrain] resolution={resolution}m attempt {attempt}/{MAX_ATTEMPTS} "
-                    f"failed: {type(e).__name__}. "
-                    + ("Retrying…" if attempt < MAX_ATTEMPTS else "Trying lower res…")
+                    f"failed: {type(e).__name__}: {e}. "
+                    + (f"Retrying in {sleep_s}s…" if attempt < MAX_ATTEMPTS
+                       else "Trying lower res…")
                 )
                 if attempt < MAX_ATTEMPTS:
-                    time.sleep(3)
+                    time.sleep(sleep_s)
 
     raise RuntimeError(f"[terrain] All resolutions failed for bbox={bbox}")
 

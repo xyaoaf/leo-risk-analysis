@@ -65,9 +65,21 @@ def score_risk(classification: dict) -> dict:
         components     : dict with fov_blockage, angle_severity, permanence scores
         explanation    : one-sentence human-readable summary
     """
-    bf       = float(classification.get("blocked_frac_buildings", 0.0))
-    max_ang  = float(classification.get("max_angle_buildings", 0.0))
     dominant = str(classification.get("dominant", "clear"))
+
+    # Select the blockage fraction and peak angle for the dominant layer.
+    # Using near-field "buildings" metrics for all types was a bug: when terrain
+    # dominates (far-field ridge), the near-field window is clear → score = 0
+    # despite feasible = False.
+    if dominant == "terrain":
+        bf      = float(classification.get("blocked_frac_terrain",   0.0))
+        max_ang = float(classification.get("max_angle_terrain",      0.0))
+    elif dominant == "vegetation":
+        bf      = float(classification.get("blocked_frac_canopy",    0.0))
+        max_ang = float(classification.get("max_angle_canopy",       0.0))
+    else:  # "building" or "clear"
+        bf      = float(classification.get("blocked_frac_buildings", 0.0))
+        max_ang = float(classification.get("max_angle_buildings",    0.0))
 
     # ── Component 1: FOV blockage ──────────────────────────────────────────
     fov_score = min(50.0, bf * 50.0)   # 100% blocked → 50 pts

@@ -131,7 +131,15 @@ def stratified_sample(df: pd.DataFrame, pts_per_county: int = 5,
 
 def _worker(args):
     """Top-level function for ProcessPoolExecutor (must be picklable)."""
-    idx, lat, lon, location_id, county_fips = args
+    idx, lat, lon, location_id, county_fips, start_delay_s = args
+    # Stagger worker startup to avoid simultaneous bursts to the 3DEP WMS
+    # endpoint, which returns errors when hit with many concurrent requests.
+    if start_delay_s > 0:
+        time.sleep(start_delay_s)
+    # Ensure PROJ database is found in spawned worker processes
+    import os
+    if "PROJ_DATA" not in os.environ:
+        os.environ["PROJ_DATA"] = "/opt/miniconda3/envs/cs378/share/proj"
     # Import inside worker — each process gets its own module state
     from feasibility import analyze_location
 
@@ -172,45 +180,82 @@ def _worker(args):
 # Parallel runner
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_batch(sample: pd.DataFrame, n_workers: int = 6) -> list[dict]:
+def run_batch(sample: pd.DataFrame, n_workers: int = 2,
+              incremental_csv: Path | None = None) -> list[dict]:
+    # Default workers reduced from 6 → 2.  The USGS 3DEP WMS endpoint rejects
+    # concurrent bursts; 2 workers limits simultaneous terrain requests to 4
+    # (2 far + 2 near), which the API handles reliably.  Each worker is also
+    # staggered by (slot * 8s) so the initial wave is spread over ~8 seconds.
+    #
+    # incremental_csv: if provided, each result is appended to this CSV
+    # immediately after the worker completes — so a crash loses at most one
+    # in-flight result rather than all completed work.
     tasks = [
         (i, float(row["latitude"]), float(row["longitude"]),
-         str(row["location_id"]), str(row["county_fips"]))
+         str(row["location_id"]), str(row["county_fips"]),
+         (i - 1) % n_workers * 8)   # start_delay_s: 0s or 8s per slot
         for i, (_, row) in enumerate(sample.iterrows(), 1)
     ]
     n = len(tasks)
     log.info(f"Running {n} points with {n_workers} workers …")
+
+    # Open incremental CSV (append mode; write header only if file is new/empty)
+    inc_file   = None
+    inc_writer = None
+    inc_header_written = False
+    if incremental_csv is not None:
+        incremental_csv.parent.mkdir(parents=True, exist_ok=True)
+        inc_file = open(incremental_csv, "a", newline="")
 
     results  = [None] * n
     done     = 0
     t_start  = time.time()
     errors   = 0
 
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        future_to_idx = {pool.submit(_worker, t): t[0] - 1 for t in tasks}
-        for fut in as_completed(future_to_idx):
-            pos = future_to_idx[fut]
-            try:
-                r = fut.result()
-            except Exception as exc:
-                r = {"idx": pos + 1, "error": str(exc), "elapsed_s": 0}
-                errors += 1
-            results[pos] = r
-            done += 1
+    try:
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            future_to_idx = {pool.submit(_worker, t): t[0] - 1 for t in tasks}
+            for fut in as_completed(future_to_idx):
+                pos = future_to_idx[fut]
+                try:
+                    r = fut.result()
+                except Exception as exc:
+                    r = {"idx": pos + 1, "error": str(exc), "elapsed_s": 0}
+                    errors += 1
+                results[pos] = r
+                done += 1
 
-            if "error" in r:
-                errors += 1
-                log.warning(f"[{done}/{n}] #{r['idx']} ERROR: {r['error']}")
-            else:
-                elapsed_wall = time.time() - t_start
-                rate = done / elapsed_wall
-                eta  = (n - done) / rate if rate > 0 else 0
-                log.info(
-                    f"[{done}/{n}] #{r['idx']} "
-                    f"risk={r['risk_score']:.0f} [{r['risk_tier']}] "
-                    f"dom={r['dominant']}  {r['elapsed_s']:.1f}s  "
-                    f"ETA {eta/60:.1f}min"
-                )
+                if "error" in r:
+                    errors += 1
+                    log.warning(f"[{done}/{n}] #{r['idx']} ERROR: {r['error']}")
+                else:
+                    elapsed_wall = time.time() - t_start
+                    rate = done / elapsed_wall
+                    eta  = (n - done) / rate if rate > 0 else 0
+                    log.info(
+                        f"[{done}/{n}] #{r['idx']} "
+                        f"risk={r['risk_score']:.0f} [{r['risk_tier']}] "
+                        f"dom={r['dominant']}  {r['elapsed_s']:.1f}s  "
+                        f"ETA {eta/60:.1f}min"
+                    )
+
+                # Incremental write: flush result to CSV immediately
+                if inc_file is not None:
+                    import csv as _csv
+                    if inc_writer is None:
+                        inc_writer = _csv.DictWriter(
+                            inc_file, fieldnames=list(r.keys()),
+                            extrasaction="ignore",
+                        )
+                        # Write header only if file was empty before this run
+                        if inc_file.tell() == 0 or not inc_header_written:
+                            inc_writer.writeheader()
+                            inc_header_written = True
+                    inc_writer.writerow(r)
+                    inc_file.flush()
+    finally:
+        if inc_file is not None:
+            inc_file.close()
 
     ok = [r for r in results if r and "error" not in r]
     log.info(
@@ -257,7 +302,13 @@ def _load_nc_counties() -> gpd.GeoDataFrame:
             fp.write_bytes(r.read())
     gdf = gpd.read_file(fp)
     gdf["county_fips"] = gdf["id"].astype(str).str.zfill(5)
-    return gdf[gdf["county_fips"].str.startswith("37")].to_crs("EPSG:4326")
+    nc = gdf[gdf["county_fips"].str.startswith("37")].copy()
+    # GeoJSON is already WGS84; skip to_crs to avoid pyproj PROJ-DB issues
+    if nc.crs is None:
+        nc = nc.set_crs("EPSG:4326")
+    elif nc.crs.to_epsg() != 4326:
+        nc = nc.to_crs("EPSG:4326")
+    return nc
 
 
 LON_LIM = (-84.5, -75.2)
@@ -512,11 +563,39 @@ def chart_tier_distribution(results: list[dict], out_path: Path):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--workers",        type=int, default=6)
-    parser.add_argument("--pts-per-county", type=int, default=5)
+    parser = argparse.ArgumentParser(
+        description="Stratified batch LEO risk analysis over NC address points.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Full NC batch (~594 pts, ~2-3 hrs)
+  conda run -n cs378 python batch_nc_analysis.py
+
+  # Dry-run: first 20 points to validate pipeline
+  conda run -n cs378 python batch_nc_analysis.py --max-points 20
+
+  # Custom AOI subset (from aoi_screen.py output)
+  conda run -n cs378 python batch_nc_analysis.py --input-csv outputs/aoi/charlotte_points.csv
+
+  # Regenerate maps from existing results without re-running pipeline
+  conda run -n cs378 python batch_nc_analysis.py --skip-pipeline
+""")
+    parser.add_argument("--workers",        type=int, default=2,
+                        help="Parallel workers (default 2; max recommended 2 to avoid "
+                             "3DEP rate-limiting)")
+    parser.add_argument("--pts-per-county", type=int, default=5,
+                        help="Points per county in stratified sample (default 5, "
+                             "ignored when --input-csv is given)")
+    parser.add_argument("--max-points",     type=int, default=None,
+                        help="Limit total points processed (dry-run safety valve). "
+                             "E.g. --max-points 20 for a quick validation run.")
+    parser.add_argument("--input-csv",      default=None,
+                        help="Path to a pre-filtered points CSV (e.g. from aoi_screen.py). "
+                             "Must have columns: location_id, latitude, longitude, "
+                             "geoid_cb, county_fips.  Skips stratified sampling.")
     parser.add_argument("--skip-pipeline",  action="store_true",
-                        help="Skip pipeline, load existing results CSV only")
+                        help="Skip pipeline entirely; load existing results CSV and "
+                             "regenerate maps only.")
     args = parser.parse_args()
 
     results_csv = OUTPUT_DIR / "batch_results.csv"
@@ -526,17 +605,38 @@ def main():
         df_res = pd.read_csv(results_csv)
         results = df_res.to_dict("records")
     else:
-        log.info("Loading DATA_CHALLENGE_50.csv …")
-        df = pd.read_csv(CSV_PATH, dtype={"geoid_cb": str})
-        df["county_fips"] = df["geoid_cb"].str[:5]
-        log.info(f"  {len(df):,} rows | {df['county_fips'].nunique()} counties")
+        if args.input_csv:
+            log.info(f"Loading custom input CSV: {args.input_csv}")
+            sample = pd.read_csv(args.input_csv, dtype={"geoid_cb": str,
+                                                         "county_fips": str})
+            # Ensure county_fips exists
+            if "county_fips" not in sample.columns and "geoid_cb" in sample.columns:
+                sample["county_fips"] = sample["geoid_cb"].str[:5]
+            log.info(f"  {len(sample):,} rows | {sample['county_fips'].nunique()} counties")
+        else:
+            log.info("Loading DATA_CHALLENGE_50.csv …")
+            df = pd.read_csv(CSV_PATH, dtype={"geoid_cb": str})
+            df["county_fips"] = df["geoid_cb"].str[:5]
+            log.info(f"  {len(df):,} rows | {df['county_fips'].nunique()} counties")
+            sample = stratified_sample(df, pts_per_county=args.pts_per_county)
 
-        sample = stratified_sample(df, pts_per_county=args.pts_per_county)
+        if args.max_points is not None and args.max_points < len(sample):
+            log.info(f"--max-points {args.max_points}: truncating sample from "
+                     f"{len(sample)} → {args.max_points} points (dry-run mode)")
+            sample = sample.head(args.max_points)
+
         sample.to_csv(OUTPUT_DIR / "batch_sample_points.csv", index=False)
 
-        results = run_batch(sample, n_workers=args.workers)
+        # Incremental CSV path: results written row-by-row as each worker
+        # completes so a crash loses at most one in-flight result.
+        incremental_csv = OUTPUT_DIR / "batch_results_incremental.csv"
+        if incremental_csv.exists():
+            incremental_csv.unlink()  # start fresh for this run
 
-        # Save raw results
+        results = run_batch(sample, n_workers=args.workers,
+                            incremental_csv=incremental_csv)
+
+        # Save final consolidated CSV (sorted by original sample order)
         pd.DataFrame(results).to_csv(results_csv, index=False)
         log.info(f"Results saved → {results_csv}")
 

@@ -21,8 +21,10 @@ resolution products capture street-scale topography.
 **Access method**: `py3dep` library → USGS WMS endpoint → returned as xarray DataArray.
 
 **Quality issues encountered**:
-- **Service timeouts**: The 3DEP WMS endpoint is flaky with transient 502/503 errors,
-  especially for 1m resolution requests. Mitigated with 2-attempt retry per resolution level.
+- **Service timeouts / rate limiting**: The 3DEP WMS endpoint returns transient 502/503 errors
+  and rejects concurrent bursts. Mitigated with **4-attempt exponential backoff per resolution**
+  (5 s → 10 s → 20 s between retries). Batch runs should use ≤ 2 parallel workers to stay
+  below the endpoint's implicit concurrency limit (6 workers caused 100% failure rate).
 - **Fallback ladder**: If 1m fails → 3m → 10m → 30m. For a 100m near-field radius at 10m/px
   this gives only a ~10×10 pixel grid, which is too coarse. In practice 1m succeeds ~85% of
   the time for Austin TX.

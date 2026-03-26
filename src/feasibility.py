@@ -224,7 +224,11 @@ def analyze_location(
     failure_mode = _classify_failure_mode(C)
 
     # ── 8. Classification & risk score ─────────────────────────────────────
-    classification = classify_obstruction(hz_far, hz_canopy, hz_full, n_az)
+    # Use hz_terrain (near-field bare, 100 m) as the terrain baseline so that
+    # canopy contribution is compared at the same spatial scale as hz_canopy.
+    # Using hz_far (1500 m) here was a bug: a far-field ridge raises bf_t above
+    # bf_c, making canopy_contrib negative (clamped to 0), hiding real vegetation.
+    classification = classify_obstruction(hz_terrain, hz_canopy, hz_full, n_az)
     risk           = score_risk(classification)
 
     # ── 9. Optional local search ────────────────────────────────────────────
@@ -260,6 +264,7 @@ def analyze_location(
         "feasible":        feasible,
         "failure_mode":    failure_mode,
         "on_building":     on_building,
+        "mount_type":      "rooftop" if on_building else "ground",
         "dish_height_asl_m": round(h_dish, 1),
         "constraints":     C,
         "horizon": {

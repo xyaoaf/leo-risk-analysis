@@ -11,24 +11,51 @@ even at addresses providers have listed as "served."
 ```bash
 conda activate cs378
 
-# Run the 5-point demo (Austin TX)
-conda run -n cs378 python main.py
+# 1. Analyze any single address (Layer 1) — outputs 5-panel PNG + JSON
+conda run -n cs378 python run_analysis.py 35.061 -80.666 --id charlotte
 
-# Run batch analysis on NC dataset (~500 stratified points, 6 workers)
-conda run -n cs378 python batch_nc_analysis.py --workers 6 --pts-per-county 5
+# 2. Run batch analysis on NC dataset (~594 stratified points, ~2–3 hrs)
+conda run -n cs378 python batch_nc_analysis.py              # full run
+conda run -n cs378 python batch_nc_analysis.py --max-points 10  # dry-run (10 pts)
+
+# 3a. Interactive Folium map (static HTML, no server needed)
+open outputs/nc_risk_map.html
+conda run -n cs378 python make_folium_map.py  # regenerate from latest results
+
+# 3b. Interactive web app with satellite imagery + click-to-compute + draw-to-batch
+conda run -n cs378 uvicorn app:app --reload --port 8000
+# → open http://localhost:8000 in a browser
+
+# 4. Filter an AOI and batch-analyze it (Layer 4)
+conda run -n cs378 python aoi_screen.py --bbox 35.0 35.5 -81.1 -80.4 \
+    --out outputs/aoi/charlotte_points.csv
+conda run -n cs378 python batch_nc_analysis.py \
+    --input-csv outputs/aoi/charlotte_points.csv --workers 2
+
+# 5. Aggregate results to census block groups / counties (Layer 5)
+conda run -n cs378 python zonal_summary.py
 
 # Run the Claude agent interactively
 export ANTHROPIC_API_KEY=sk-ant-...
 conda run -n cs378 python src/agent.py "Analyze Starlink risk at 35.06, -80.67"
 ```
 
-Outputs land in `outputs/`:
-- `point_{label}.png` — 3-panel visualization per location
-- `point_{label}.json` — risk score + obstruction breakdown JSON
-- `summary.png` — multi-point comparison chart
-- `batch/batch_results.csv` — full batch results
-- `batch/map_county_risk.png` — county-level choropleth
-- `batch/chart_tier_dist.png` — tier distribution summary
+See [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for full documentation of all five workflows.
+
+---
+
+## System Workflows
+
+Five workflows are supported; see [docs/WORKFLOWS.md](docs/WORKFLOWS.md) for full documentation.
+
+| # | Workflow | Script | Status |
+|---|----------|--------|--------|
+| 1 | **Single-point diagnostic** | `run_analysis.py LAT LON` | ✅ Implemented |
+| 2 | **Batch processing** | `batch_nc_analysis.py` | ✅ Implemented |
+| 3a | **Static interactive map** | `make_folium_map.py` → `outputs/nc_risk_map.html` | ✅ Implemented |
+| 3b | **Web app** (satellite + click-to-compute + draw-to-batch) | `uvicorn app:app --port 8000` | ✅ Implemented |
+| 4 | **AOI screening** | `aoi_screen.py --bbox / --geojson` | 🔶 Prototype |
+| 5 | **Zonal summary** | `zonal_summary.py` | 🔶 Prototype |
 
 ---
 
@@ -36,20 +63,29 @@ Outputs land in `outputs/`:
 
 ```
 leo_risk_analysis/
-├── main.py                    # Demo runner (5 Austin TX test points)
-├── batch_nc_analysis.py       # Stratified batch runner + county charts
+├── run_analysis.py            # [Layer 1] Single-point CLI diagnostic (5-panel PNG + JSON)
+├── main.py                    # [Layer 1] Demo runner (5 Austin TX test points)
+├── test_nc_points.py          # [Layer 1] 8-point NC validation set
+├── batch_nc_analysis.py       # [Layer 2] Stratified batch runner + county charts
+├── make_folium_map.py         # [Layer 3] Interactive Folium map builder (static HTML)
+├── app.py                     # [Layer 3] FastAPI web app (satellite map, click-to-compute)
+├── templates/map.html         # [Layer 3] Leaflet.js map template (Esri satellite + Draw)
+├── aoi_screen.py              # [Layer 4] AOI bbox/polygon point filter
+├── zonal_summary.py           # [Layer 5] Block-group / county aggregation
+├── explore_challenge50.py     # EDA + pipeline test on Challenge-50 dataset
 ├── remake_maps.py             # Regenerate publication-ready EDA maps
 ├── src/
 │   ├── feasibility.py         # analyze_location() — orchestrator + constraints
 │   ├── agent.py               # Claude-orchestrated agent (tool_use loop)
 │   ├── scoring.py             # Deterministic 0–100 risk score
 │   └── tools/
-│       ├── terrain.py         # USGS 3DEP DEM (1m/3m/10m/30m ladder)
+│       ├── terrain.py         # USGS 3DEP DEM (1m/3m/10m/30m, 4-attempt backoff)
 │       ├── canopy.py          # Meta Trees 1m via GEE · 27m S3 fallback
 │       ├── buildings.py       # Microsoft ML Footprints (Google fallback)
 │       ├── surface.py         # Obstruction surface compositor
 │       └── horizon.py         # Vectorised ray-casting + classifier
 ├── docs/
+│   ├── WORKFLOWS.md           # All five workflow layers (entry commands + I/O specs)
 │   ├── ARCHITECTURE.md        # Mermaid diagram + component table
 │   ├── DESIGN.md              # Full algorithm specification
 │   ├── ANALYSIS_RATIONALE.md  # From install guide to methodology
@@ -58,7 +94,14 @@ leo_risk_analysis/
 ├── data/
 │   ├── buildings/             # Cached building tile GeoParquets (by quadkey)
 │   └── tiles/canopy/          # Cached GEE 1m canopy GeoTIFFs
-└── outputs/                   # Generated figures, JSON results, batch CSVs
+└── outputs/
+    ├── reports/               # [Layer 1] Per-point reports (run_analysis.py)
+    ├── batch/                 # [Layer 2] Batch results + county maps
+    ├── challenge50/           # Challenge-50 sample results (37 pts)
+    ├── nc_test/               # NC validation set (8 pts)
+    ├── zonal/                 # [Layer 5] Block-group + county summaries
+    ├── aoi/                   # [Layer 4] AOI-filtered point CSVs
+    └── nc_risk_map.html       # [Layer 3] Interactive map (open in browser)
 ```
 
 ---
@@ -196,7 +239,9 @@ To run on the full 1M-location dataset:
 4. **Canopy tiles (GEE 1m)**: Results are cached as GeoTIFFs under `data/tiles/canopy/`.
    Cold calls ~0.2s; cached calls instant. For 1M locations most unique 100m windows will
    not overlap — expect full GEE quota consumption; use batch quotas or pre-cache by county.
-5. **Parallelism bound**: 3DEP WMS has a rate limit (~10 concurrent requests). Use a semaphore.
+5. **Parallelism bound**: 3DEP WMS rate-limits concurrent bursts (6 workers caused 100% failure
+   in testing). Default is **2 workers** with exponential backoff (5→10→20 s). For higher
+   throughput, implement a semaphore that limits concurrent 3DEP requests to ≤4.
 
 Estimated throughput at full scale: ~500 locations/hour single-threaded → ~5,000/hour with
 10-process pool and 3DEP semaphore.

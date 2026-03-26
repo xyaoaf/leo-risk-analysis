@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NC Starlink LEO Risk Map</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Leaflet.Draw -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', sans-serif; background: #111827; color: #f9fafb; height: 100vh; display: flex; flex-direction: column; }
+
+    /* ── Top bar ── */
+    #topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 16px; background: #1f2937; border-bottom: 1px solid #374151;
+      flex-shrink: 0; z-index: 1000;
+    }
+    #topbar h1 { font-size: 15px; font-weight: 700; color: #f9fafb; white-space: nowrap; }
+    #topbar span { font-size: 12px; color: #9ca3af; }
+    #status-bar { margin-left: auto; font-size: 11px; color: #6b7280; }
+
+    /* ── Main layout ── */
+    #main { flex: 1; display: flex; overflow: hidden; }
+    #map  { flex: 1; }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: 340px; background: #1f2937; border-left: 1px solid #374151;
+      display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+    }
+    #sidebar-header {
+      padding: 10px 14px; background: #111827; border-bottom: 1px solid #374151;
+      font-size: 12px; font-weight: 600; color: #d1d5db;
+    }
+    #sidebar-content { flex: 1; overflow-y: auto; padding: 12px; }
+    #sidebar-content p { font-size: 11px; color: #6b7280; line-height: 1.5; }
+
+    /* ── Result card ── */
+    .result-card { background: #111827; border-radius: 6px; border: 1px solid #374151; margin-bottom: 10px; overflow: hidden; }
+    .result-card .card-header {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; font-size: 12px; font-weight: 600;
+    }
+    .result-card .card-body { padding: 10px 12px; }
+    .result-card .card-body table { width: 100%; font-size: 11px; border-collapse: collapse; }
+    .result-card .card-body td { padding: 2px 0; color: #9ca3af; }
+    .result-card .card-body td:last-child { text-align: right; color: #f3f4f6; font-weight: 500; }
+    .result-card .card-img { width: 100%; border-top: 1px solid #374151; }
+    .result-card .card-img img { width: 100%; display: block; }
+
+    /* ── Tier badges ── */
+    .tier-low      { background: #065f46; color: #6ee7b7; }
+    .tier-moderate { background: #78350f; color: #fcd34d; }
+    .tier-high     { background: #7c2d12; color: #fb923c; }
+    .tier-critical { background: #7f1d1d; color: #fca5a5; }
+
+    /* ── Spinner ── */
+    #spinner {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 9999; justify-content: center; align-items: center; flex-direction: column; gap: 14px;
+    }
+    #spinner.active { display: flex; }
+    .spin-ring {
+      width: 48px; height: 48px; border: 4px solid #374151;
+      border-top-color: #60a5fa; border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #spinner p { color: #d1d5db; font-size: 13px; }
+
+    /* ── Confirm dialog ── */
+    #confirm-dialog {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      z-index: 9998; justify-content: center; align-items: center;
+    }
+    #confirm-dialog.active { display: flex; }
+    #confirm-box {
+      background: #1f2937; border: 1px solid #374151; border-radius: 10px;
+      padding: 24px 28px; max-width: 400px; text-align: center;
+    }
+    #confirm-box h2 { font-size: 15px; margin-bottom: 10px; color: #f9fafb; }
+    #confirm-box p  { font-size: 12px; color: #9ca3af; margin-bottom: 18px; line-height: 1.6; }
+    .btn { padding: 7px 18px; border-radius: 5px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; }
+    .btn-primary { background: #3b82f6; color: white; }
+    .btn-secondary { background: #374151; color: #d1d5db; margin-left: 10px; }
+
+    /* ── Legend ── */
+    #legend {
+      position: absolute; bottom: 28px; left: 10px; z-index: 800;
+      background: rgba(17,24,39,0.92); border: 1px solid #374151;
+      border-radius: 8px; padding: 10px 14px; font-size: 11px;
+    }
+    #legend h4 { font-size: 11px; font-weight: 700; color: #d1d5db; margin-bottom: 6px; }
+    .leg-row { display: flex; align-items: center; gap: 7px; margin: 3px 0; }
+    .leg-dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.4); flex-shrink: 0; }
+
+    /* ── Instruction box ── */
+    #instructions {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      z-index: 800; background: rgba(17,24,39,0.90); border: 1px solid #374151;
+      border-radius: 8px; padding: 8px 18px; font-size: 11px; color: #9ca3af;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Top bar ────────────────────────────────────────────────────────── -->
+<div id="topbar">
+  <h1>NC Starlink LEO Risk Map</h1>
+  <span>{{ n_precomputed }} pre-computed points</span>
+  <div id="status-bar">Ready</div>
+</div>
+
+<!-- ── Main ──────────────────────────────────────────────────────────── -->
+<div id="main">
+  <div id="map"></div>
+
+  <div id="sidebar">
+    <div id="sidebar-header">Analysis Results</div>
+    <div id="sidebar-content">
+      <p>
+        Click any marker to view its pre-computed risk report.<br><br>
+        Click anywhere else on the map to analyse the nearest address from the dataset (~30 s).<br><br>
+        Use the rectangle tool (toolbar, top-right of map) to draw a bounding box for batch analysis.
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- ── Map overlays ──────────────────────────────────────────────────── -->
+<div id="legend">
+  <h4>Risk Tier</h4>
+  <div class="leg-row"><div class="leg-dot" style="background:#2ecc71"></div> Low</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#f39c12"></div> Moderate</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#e67e22"></div> High</div>
+  <div class="leg-row"><div class="leg-dot" style="background:#e74c3c"></div> Critical</div>
+  <div style="margin-top:6px;font-size:10px;color:#6b7280">✗ = infeasible location</div>
+</div>
+
+<div id="instructions">
+  Click map → analyse nearest point &nbsp;|&nbsp; Draw rectangle → batch analyse AOI
+</div>
+
+<!-- ── Spinner ───────────────────────────────────────────────────────── -->
+<div id="spinner">
+  <div class="spin-ring"></div>
+  <p id="spinner-msg">Analysing…</p>
+</div>
+
+<!-- ── Confirm dialog (AOI > threshold) ──────────────────────────────── -->
+<div id="confirm-dialog">
+  <div id="confirm-box">
+    <h2>⚠ Large AOI</h2>
+    <p id="confirm-msg">This area contains many points.</p>
+    <button class="btn btn-primary" id="confirm-yes">Run analysis</button>
+    <button class="btn btn-secondary" id="confirm-no">Cancel</button>
+  </div>
+</div>
+
+<script>
+// ── Tier styling ────────────────────────────────────────────────────────────
+const TIER_COLOR = { low: '#2ecc71', moderate: '#f39c12', high: '#e67e22', critical: '#e74c3c' };
+
+function tierColor(tier) { return TIER_COLOR[tier] || '#6b7280'; }
+function markerHtml(tier, feasible) {
+  const c   = tierColor(tier);
+  const sym = feasible ? '' : '✗';
+  return `<div style="width:14px;height:14px;border-radius:50%;background:${c};
+    border:2px solid rgba(255,255,255,0.7);display:flex;align-items:center;
+    justify-content:center;font-size:8px;color:white;font-weight:700">${sym}</div>`;
+}
+
+function makeIcon(tier, feasible) {
+  return L.divIcon({
+    html: markerHtml(tier, feasible),
+    className: '',
+    iconSize: [14, 14],
+    iconAnchor: [7, 7],
+  });
+}
+
+// ── Map initialisation ──────────────────────────────────────────────────────
+const map = L.map('map', { center: [35.5, -79.5], zoom: 7, zoomControl: true });
+
+// Esri World Imagery satellite tile layer
+L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  {
+    attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
+    maxZoom: 19,
+  }
+).addTo(map);
+
+// Label overlay (Esri World Boundaries and Places — labels only, transparent background)
+L.tileLayer(
+  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, opacity: 0.7 }
+).addTo(map);
+
+// ── Leaflet.Draw – rectangle tool only ─────────────────────────────────────
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  draw: {
+    polyline: false, polygon: false, circle: false,
+    circlemarker: false, marker: false,
+    rectangle: { shapeOptions: { color: '#60a5fa', weight: 2 } },
+  },
+  edit: { featureGroup: drawnItems },
+});
+map.addControl(drawControl);
+
+// ── State ───────────────────────────────────────────────────────────────────
+const markers   = {};   // location_id → Leaflet marker
+let pendingBbox = null; // pending AOI bbox waiting for confirmation
+
+// ── Sidebar helpers ─────────────────────────────────────────────────────────
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+function showResult(r, title) {
+  const sc = document.getElementById('sidebar-content');
+  const tierClass = `tier-${r.risk_tier}`;
+  const feasStr   = r.feasible ? 'Yes' : `No (${r.failure_mode || '—'})`;
+  const bnHtml    = r.best_nearby && r.best_nearby.risk_delta != null
+    ? `<tr><td>Best nearby</td><td>${r.best_nearby.distance_m?.toFixed(0)} m &nbsp;Δ${r.best_nearby.risk_delta?.toFixed(0)} pts</td></tr>`
+    : '';
+  const warnHtml = r.warnings
+    ? `<p style="color:#f59e0b;font-size:10px;margin-top:8px;line-height:1.5">⚠ ${r.warnings}</p>`
+    : '';
+  const pngHtml = r.png_url
+    ? `<div class="card-img"><img src="${r.png_url}?t=${Date.now()}" alt="Risk diagram" loading="lazy" /></div>`
+    : '';
+
+  sc.innerHTML = `
+    <div class="result-card">
+      <div class="card-header ${tierClass}">
+        ${r.risk_tier.toUpperCase()} — Score ${r.risk_score?.toFixed(0)}/100
+        <span style="font-size:10px;margin-left:auto;font-weight:400">${title}</span>
+      </div>
+      <div class="card-body">
+        <table>
+          <tr><td>Location ID</td><td>${r.location_id}</td></tr>
+          <tr><td>Coords</td><td>${r.lat?.toFixed(5)}, ${r.lon?.toFixed(5)}</td></tr>
+          <tr><td>Feasible</td><td>${feasStr}</td></tr>
+          <tr><td>Dominant</td><td>${r.dominant}</td></tr>
+          <tr><td>Slope</td><td>${r.slope_deg?.toFixed(1)}°</td></tr>
+          <tr><td>Canopy max</td><td>${r.canopy_max_m?.toFixed(0)} m</td></tr>
+          <tr><td>Buildings</td><td>${r.building_count}</td></tr>
+          ${bnHtml}
+        </table>
+        ${warnHtml}
+      </div>
+      ${pngHtml}
+    </div>`;
+}
+
+function showBatchResults(results) {
+  const sc = document.getElementById('sidebar-content');
+  const tiers = { low: 0, moderate: 0, high: 0, critical: 0 };
+  results.forEach(r => { tiers[r.risk_tier] = (tiers[r.risk_tier] || 0) + 1; });
+  const n = results.length;
+  const nFeasible = results.filter(r => r.feasible).length;
+
+  const tierHtml = Object.entries(tiers)
+    .filter(([, v]) => v > 0)
+    .map(([t, v]) => `<span style="color:${tierColor(t)}">${v} ${t}</span>`)
+    .join(' &nbsp;');
+
+  sc.innerHTML = `
+    <div class="result-card">
+      <div class="card-header" style="background:#1e3a5f;color:#bfdbfe">
+        AOI Batch — ${n} points
+      </div>
+      <div class="card-body">
+        <table>
+          <tr><td>Feasible</td><td>${nFeasible} / ${n}</td></tr>
+          <tr><td>Tiers</td><td>${tierHtml}</td></tr>
+          <tr><td>Mean risk</td><td>${(results.reduce((a,r)=>a+r.risk_score,0)/n).toFixed(1)}/100</td></tr>
+        </table>
+      </div>
+    </div>`;
+
+  results.forEach(r => {
+    const sc2 = document.getElementById('sidebar-content');
+    const div = document.createElement('div');
+    div.className = 'result-card';
+    div.innerHTML = `
+      <div class="card-header tier-${r.risk_tier}" style="cursor:pointer" onclick="map.panTo([${r.lat},${r.lon}])">
+        ${r.risk_tier.toUpperCase()} ${r.risk_score?.toFixed(0)}/100 &nbsp; ${r.location_id}
+      </div>`;
+    sc2.appendChild(div);
+  });
+}
+
+// ── Spinner helpers ─────────────────────────────────────────────────────────
+function showSpinner(msg) {
+  document.getElementById('spinner-msg').textContent = msg || 'Analysing…';
+  document.getElementById('spinner').classList.add('active');
+}
+function hideSpinner() {
+  document.getElementById('spinner').classList.remove('active');
+}
+
+// ── Add / update a marker on the map ───────────────────────────────────────
+function addMarker(r, title) {
+  const lid = r.location_id;
+  if (markers[lid]) map.removeLayer(markers[lid]);
+
+  const m = L.marker([r.lat, r.lon], { icon: makeIcon(r.risk_tier, r.feasible) })
+    .addTo(map)
+    .on('click', () => showResult(r, title));
+
+  m.bindTooltip(
+    `${r.risk_tier.toUpperCase()} ${r.risk_score?.toFixed(0)}/100 — ${r.dominant} [${r.location_id}]`,
+    { direction: 'top', offset: [0, -8] }
+  );
+  markers[lid] = m;
+  return m;
+}
+
+// ── Load pre-computed results ───────────────────────────────────────────────
+async function loadPrecomputed() {
+  setStatus('Loading pre-computed results…');
+  try {
+    const res = await fetch('/api/precomputed');
+    const data = await res.json();
+    data.forEach(r => addMarker(r, r._source || 'precomputed'));
+    setStatus(`${data.length} pre-computed points loaded`);
+  } catch (e) {
+    setStatus('Failed to load pre-computed results');
+    console.error(e);
+  }
+}
+
+// ── Click-anywhere → nearest point → analyse ───────────────────────────────
+map.on('click', async (e) => {
+  const { lat, lng } = e.latlng;
+  showSpinner('Looking up nearest address…');
+  setStatus('Looking up nearest address…');
+  try {
+    const nearRes = await fetch(`/api/nearest?lat=${lat}&lon=${lng}`);
+    if (!nearRes.ok) throw new Error(await nearRes.text());
+    const nearest = await nearRes.json();
+
+    setStatus(`Nearest: ${nearest.location_id} (${nearest.dist_m?.toFixed(0)} m away). Analysing…`);
+    showSpinner(`Analysing ${nearest.location_id}…`);
+
+    const anaRes = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lat: nearest.lat, lon: nearest.lon, location_id: nearest.location_id }),
+    });
+    if (!anaRes.ok) throw new Error(await anaRes.text());
+    const result = await anaRes.json();
+
+    const m = addMarker(result, 'on-demand');
+    showResult(result, `On-demand (${nearest.dist_m?.toFixed(0)} m from click)`);
+    map.panTo([result.lat, result.lon]);
+    setStatus(`Analysis complete: ${result.risk_tier.toUpperCase()} ${result.risk_score?.toFixed(0)}/100 (${result.elapsed_s} s)`);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+    console.error(err);
+  } finally {
+    hideSpinner();
+  }
+});
+
+// ── Rectangle draw → AOI batch ──────────────────────────────────────────────
+map.on(L.Draw.Event.CREATED, async (e) => {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(e.layer);
+
+  const b = e.layer.getBounds();
+  const bbox = {
+    lat_min: b.getSouth(), lat_max: b.getNorth(),
+    lon_min: b.getWest(),  lon_max: b.getEast(),
+    confirmed: false,
+  };
+
+  await runAoiBatch(bbox);
+});
+
+async function runAoiBatch(bbox) {
+  showSpinner('Counting points in AOI…');
+  setStatus('Counting points in AOI…');
+  try {
+    const res = await fetch('/api/analyze_bbox', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bbox),
+    });
+
+    if (res.status === 202) {
+      // Confirmation required
+      const data = await res.json();
+      hideSpinner();
+      pendingBbox = { ...bbox, confirmed: true };
+      document.getElementById('confirm-msg').textContent = data.message;
+      document.getElementById('confirm-dialog').classList.add('active');
+      return;
+    }
+
+    const data = await res.json();
+    if (data.status === 'empty') {
+      setStatus('No data points in selected area.');
+      hideSpinner();
+      return;
+    }
+
+    setStatus(`AOI batch: ${data.n_points} points complete`);
+    data.results.forEach(r => addMarker(r, 'aoi-batch'));
+    showBatchResults(data.results);
+    if (data.errors.length) console.warn('Batch errors:', data.errors);
+  } catch (err) {
+    setStatus(`Batch error: ${err.message}`);
+    console.error(err);
+  } finally {
+    hideSpinner();
+  }
+}
+
+// Confirm dialog buttons
+document.getElementById('confirm-yes').onclick = async () => {
+  document.getElementById('confirm-dialog').classList.remove('active');
+  if (pendingBbox) {
+    showSpinner(`Analysing AOI (up to 100 points)…`);
+    await runAoiBatch(pendingBbox);
+    pendingBbox = null;
+  }
+};
+document.getElementById('confirm-no').onclick = () => {
+  document.getElementById('confirm-dialog').classList.remove('active');
+  drawnItems.clearLayers();
+  setStatus('AOI cancelled.');
+  pendingBbox = null;
+};
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+loadPrecomputed();
+</script>
+</body>
+</html>

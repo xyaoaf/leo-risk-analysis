@@ -25,9 +25,10 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
-from matplotlib.colors import LightSource
+from matplotlib.colors import LightSource, Normalize
 from matplotlib.patches import Polygon as MplPolygon, Rectangle
 from matplotlib.collections import PatchCollection
 
@@ -149,12 +150,12 @@ def _print_table(results: list):
 
 
 # ---------------------------------------------------------------------------
-# Visualisation — per-point 4-panel figure
+# Visualisation — per-point 5-panel figure
 # ---------------------------------------------------------------------------
 
 def _plot_point(result: dict, out_path: Path):
-    fig = plt.figure(figsize=(20, 5), facecolor="#111827")
-    gs  = fig.add_gridspec(1, 4, wspace=0.35)
+    fig = plt.figure(figsize=(25, 5), facecolor="#111827")
+    gs  = fig.add_gridspec(1, 5, wspace=0.35)
 
     label   = result["label"]
     lat, lon = result["lat"], result["lon"]
@@ -185,14 +186,12 @@ def _plot_point(result: dict, out_path: Path):
     hz_full   = np.array(result["horizon"]["full"])
     n_az      = result["horizon"]["n_azimuths"]
 
-    # ── Panel 0: Far-field terrain ──────────────────────────────────────────
-    # We need the actual arrays — re-use the fetched data stored in result
-    # If not available (JSON round-trip), skip raster panels gracefully
     _plot_terrain_panel(fig, gs[0], result, ext, hillshade_norm, lat, lon)
     _plot_near_panel(fig, gs[1], result, ext, hillshade_norm, canopy_cmap, lat, lon)
     _plot_constraints_panel(fig, gs[2], result)
     _plot_polar_panel(fig, gs[3], hz_far, hz_canopy, hz_full, n_az,
                       dom, dom_col, rk)
+    _plot_suitability_panel(fig, gs[4], result, lat, lon)
 
     fig.suptitle(
         f"{label}  ({lat:.5f}, {lon:.5f})  |  "
@@ -329,31 +328,74 @@ def _plot_constraints_panel(fig, gs_pos, result):
 
 def _plot_polar_panel(fig, gs_pos, hz_far, hz_canopy, hz_full, n_az,
                       dom, dom_col, rk):
-    """Polar horizon profile panel."""
+    """Polar horizon profile panel with incremental fills per obstruction type."""
     ax = fig.add_subplot(gs_pos, polar=True, facecolor="#1a1a2e")
 
     angles_rad = np.linspace(0, 2 * np.pi, n_az, endpoint=False)
-    theta      = (np.pi / 2 - angles_rad) % (2 * np.pi)
+    # Convert compass angle (CW from N) → math angle (CCW from E) for polar plot
+    theta = (np.pi / 2 - angles_rad) % (2 * np.pi)
 
-    def pfill(hz, color, alpha, label):
-        v = np.clip(hz, 0, 90)
-        t = np.append(theta, theta[0])
-        v = np.append(v, v[0])
-        ax.fill(t, v, color=color, alpha=alpha, label=label)
-        ax.plot(t, v, color=color, lw=0.8)
+    # Compute FOV-blocked percentages (FOV = ±50° around North, threshold = 25°)
+    threshold_deg = 25.0
+    step_deg      = 360.0 / n_az
+    n_fov_half    = int(50.0 / step_deg)  # azimuths each side of North
+    fov_idx       = list(range(n_fov_half + 1)) + list(range(n_az - n_fov_half, n_az))
+    hz_far_fov    = hz_far[fov_idx]
+    hz_can_fov    = hz_canopy[fov_idx]
+    hz_full_fov   = hz_full[fov_idx]
 
-    pfill(hz_far,    "#8e6b3e", 0.5, "Terrain")
-    pfill(hz_canopy, "#27ae60", 0.4, "Terrain+Canopy")
-    pfill(hz_full,   "#e74c3c", 0.3, "All layers")
+    pct_terrain  = 100.0 * (hz_far_fov  > threshold_deg).mean()
+    pct_canopy   = 100.0 * ((hz_can_fov  > threshold_deg) & (hz_far_fov  <= threshold_deg)).mean()
+    pct_building = 100.0 * ((hz_full_fov > threshold_deg) & (hz_can_fov  <= threshold_deg)).mean()
 
+    # --- Incremental fill helper ------------------------------------------------
+    # Each layer fills only the *delta* above the previous layer, so colours
+    # never overlap: terrain (brown) → canopy-delta (green) → building-delta (red).
+    def _closed(arr):
+        """Close an array by appending its first element."""
+        return np.append(arr, arr[0])
+
+    def _ring_polygon(theta_c, r_outer, r_inner):
+        """
+        Return (theta_poly, r_poly) forming a closed ring between r_inner and
+        r_outer, traced forward along the outer and backward along the inner.
+        """
+        t = np.concatenate([theta_c, theta_c[::-1]])
+        r = np.concatenate([r_outer, r_inner[::-1]])
+        return t, r
+
+    t_c       = _closed(theta)
+    far_c     = np.clip(_closed(hz_far),    0, 90)
+    can_top_c = np.clip(_closed(np.maximum(hz_far,    hz_canopy)), 0, 90)
+    bld_top_c = np.clip(_closed(np.maximum(hz_canopy, hz_full)),   0, 90)
+
+    # Layer 1: terrain (0 → hz_far, 1500 m radius)
+    ax.fill(t_c, far_c, color="#8e6b3e", alpha=0.90,
+            label=f"Terrain  {pct_terrain:.0f}%  (1500 m)")
+    ax.plot(t_c, far_c, color="#a07840", lw=0.8)
+
+    # Layer 2: canopy delta (hz_far → max(hz_far, hz_canopy), 100 m radius)
+    t_poly, r_poly = _ring_polygon(t_c, can_top_c, far_c)
+    ax.fill(t_poly, r_poly, color="#27ae60", alpha=0.90,
+            label=f"Canopy Δ  {pct_canopy:.0f}%  (100 m)")
+    ax.plot(t_c, can_top_c, color="#2ecc71", lw=0.8)
+
+    # Layer 3: building delta (max(hz_far,hz_can) → max(hz_can,hz_full), 100 m radius)
+    t_poly2, r_poly2 = _ring_polygon(t_c, bld_top_c, can_top_c)
+    ax.fill(t_poly2, r_poly2, color="#e74c3c", alpha=0.90,
+            label=f"Buildings Δ  {pct_building:.0f}%  (100 m)")
+    ax.plot(t_c, bld_top_c, color="#e74c3c", lw=0.8)
+
+    # 25° reference ring
     t_ring = np.linspace(0, 2 * np.pi, 200)
-    ax.plot(t_ring, np.full_like(t_ring, 25), "w--", lw=0.8, alpha=0.6)
-    ax.text(np.pi / 4, 27, "25°", color="white", fontsize=6)
+    ax.plot(t_ring, np.full_like(t_ring, threshold_deg), "w--", lw=0.8, alpha=0.6)
+    ax.text(np.pi / 4, threshold_deg + 2, f"{threshold_deg:.0f}°",
+            color="white", fontsize=6)
 
-    # FOV arc highlight
+    # FOV arc shading (±50° around N)
     fov_az = np.linspace(-50, 50, 40)
     fov_th = (np.pi / 2 - np.radians(fov_az)) % (2 * np.pi)
-    ax.fill_between(fov_th, 0, 5, color="#4a90d9", alpha=0.15)
+    ax.fill_between(fov_th, 0, 4, color="#4a90d9", alpha=0.15)
 
     ax.set_theta_zero_location("N")
     ax.set_theta_direction(-1)
@@ -363,12 +405,120 @@ def _plot_polar_panel(fig, gs_pos, hz_far, hz_canopy, hz_full, n_az,
     ax.set_facecolor("#1a1a2e")
     ax.spines["polar"].set_color("#555")
     ax.grid(color="#333", lw=0.4)
-    ax.legend(loc="lower left", fontsize=6,
+    ax.legend(loc="lower left", fontsize=5.5,
               facecolor="#222", edgecolor="#555", labelcolor="white",
-              bbox_to_anchor=(-0.25, -0.15))
+              bbox_to_anchor=(-0.30, -0.18))
     ax.set_title(
         f"Horizon Profile\n{dom.upper()}  {rk['risk_score']:.0f}/100 [{rk['risk_tier']}]",
         color=dom_col, fontsize=8, pad=10, fontweight="bold",
+    )
+
+
+def _plot_suitability_panel(fig, gs_pos, result, lat, lon):
+    """
+    Suitability / neighbourhood panel.
+
+    Shows:
+      • Satellite tile background (Esri World Imagery via contextily, if available)
+      • Neighbourhood search candidates coloured by risk score (green → red)
+      • Best nearby point as a gold star
+      • Queried origin as a white crosshair
+      • Key metrics text box
+    """
+    ax = fig.add_subplot(gs_pos, facecolor="#1a1a2e")
+
+    bbox = result.get("_surf_bbox")   # (west, south, east, north) in WGS84
+    best_nearby = result.get("best_nearby")
+
+    if bbox is None:
+        ax.text(0.5, 0.5, "Suitability\n(re-run to\ncache rasters)",
+                ha="center", va="center", color="white", fontsize=7,
+                transform=ax.transAxes)
+        _style_ax(ax, "Neighbourhood Suitability")
+        return
+
+    west, south, east, north = bbox
+    # Expand slightly for visual breathing room
+    pad_lon = (east  - west)  * 0.05
+    pad_lat = (north - south) * 0.05
+    ax.set_xlim(west  - pad_lon, east  + pad_lon)
+    ax.set_ylim(south - pad_lat, north + pad_lat)
+
+    # ── Satellite tile background ────────────────────────────────────────────
+    sat_ok = False
+    try:
+        import contextily as ctx
+        ctx.add_basemap(
+            ax, crs="EPSG:4326",
+            source=ctx.providers.Esri.WorldImagery,
+            zoom="auto", attribution=False,
+        )
+        sat_ok = True
+    except Exception:
+        ax.set_facecolor("#1e293b")   # dark blue-grey fallback
+
+    # ── Candidate scatter ────────────────────────────────────────────────────
+    n_candidates = 0
+    if best_nearby and best_nearby.get("candidates"):
+        cands = best_nearby["candidates"]
+        n_candidates = len(cands)
+        c_lons   = np.array([c["lon"]        for c in cands])
+        c_lats   = np.array([c["lat"]        for c in cands])
+        c_scores = np.array([c["risk_score"] for c in cands], dtype=float)
+
+        sc = ax.scatter(
+            c_lons, c_lats,
+            c=c_scores, cmap="RdYlGn_r", vmin=0, vmax=100,
+            s=22, alpha=0.80, zorder=5,
+            edgecolors="white", linewidths=0.4,
+        )
+
+        # Best nearby — gold star
+        best = best_nearby.get("best")
+        if best:
+            ax.plot(best["lon"], best["lat"],
+                    "*", color="#fbbf24", ms=13, zorder=7,
+                    mec="white", mew=0.8,
+                    label=f"Best ({best['risk_score']:.0f}/100)")
+
+    # ── Origin crosshair ─────────────────────────────────────────────────────
+    ax.plot(lon, lat, "w+", ms=13, mew=2.0, zorder=8)
+
+    # ── Metrics text box ─────────────────────────────────────────────────────
+    rk  = result["risk"]
+    imp = (best_nearby or {}).get("improvement")
+    lines = [f"Score: {rk['risk_score']:.0f}/100 [{rk['risk_tier'].upper()}]"]
+    if imp:
+        lines.append(
+            f"Best Δ: −{imp['risk_delta']:.0f} pts  "
+            f"@ {imp['distance_m']:.0f} m"
+        )
+        if imp.get("feasible_gained"):
+            lines.append("→ becomes feasible")
+    ax.text(
+        0.03, 0.97, "\n".join(lines),
+        transform=ax.transAxes,
+        color="white", fontsize=6.0, va="top", ha="left",
+        bbox=dict(fc="#111827", ec="#555", alpha=0.85, pad=2.5),
+        zorder=9,
+    )
+
+    # ── Legend dot ───────────────────────────────────────────────────────────
+    if n_candidates > 0:
+        # Compact colourbar as a single legend entry is cleaner; skip full cb
+        ax.plot([], [], "o", color="#27ae60", ms=5, label="Low risk")
+        ax.plot([], [], "o", color="#e74c3c", ms=5, label="High risk")
+        ax.legend(loc="lower right", fontsize=5.5,
+                  facecolor="#222", edgecolor="#555", labelcolor="white",
+                  framealpha=0.85)
+
+    ax.set_xticks([]); ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#444")
+    sat_note = "" if sat_ok else " (no satellite tile)"
+    ax.set_title(
+        f"Neighbourhood ({n_candidates} candidates, 50 m){sat_note}",
+        color="white", fontsize=7.0, pad=4,
     )
 
 
