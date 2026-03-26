@@ -135,6 +135,9 @@ def analyze_location(
             "If structures are present, blockage may be underestimated."
         )
 
+    # Compute building height confidence summary from source_height column
+    _bldg_height_conf = _building_height_confidence(buildings)
+
     # ── 2. Surface composition ──────────────────────────────────────────────
     surf = build_obstruction_surface(terrain_near, canopy, buildings)
 
@@ -274,6 +277,7 @@ def analyze_location(
         "mount_type":      "rooftop" if on_building else "ground",
         "canopy_type":     canopy_type,
         "evergreen_frac":  round(evergreen_frac, 2),
+        "building_height_confidence": _bldg_height_conf,
         "dish_height_asl_m": round(h_dish, 1),
         "constraints":     C,
         "horizon": {
@@ -488,7 +492,9 @@ def _evaluate_candidate(
     )
 
     cl = classify_obstruction(hz_far, hz_can, hz_full, n_az)
-    rk = score_risk(cl)
+    elev_m = float(np.nanmedian(S_terrain))
+    ev_frac, _ = _estimate_canopy_type(c_lat, elev_m)
+    rk = score_risk(cl, evergreen_fraction=ev_frac)
 
     return {
         "lat":        c_lat,
@@ -699,6 +705,36 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
            + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2))
            * np.sin(dlon / 2) ** 2)
     return R * 2 * np.arcsin(np.sqrt(a))
+
+
+def _building_height_confidence(buildings: dict) -> str:
+    """
+    Summarise the height data quality for the buildings in the analysis area.
+
+    Returns
+    -------
+    str — one of:
+        "ml_predicted"  : all (or ≥80%) heights from Microsoft ML predictions
+        "mixed"         : mix of ML-predicted and area-heuristic estimates
+        "area_estimate" : all (or ≥80%) heights estimated from footprint area
+        "none"          : no buildings detected
+    """
+    gdf = buildings.get("gdf")
+    if gdf is None or len(gdf) == 0:
+        return "none"
+    if "source_height" not in gdf.columns:
+        return "unknown"
+
+    counts = gdf["source_height"].value_counts()
+    total = len(gdf)
+    n_ml = int(counts.get("ms_predicted", 0))
+    pct_ml = n_ml / total
+
+    if pct_ml >= 0.80:
+        return "ml_predicted"
+    if pct_ml <= 0.20:
+        return "area_estimate"
+    return "mixed"
 
 
 def _estimate_canopy_type(lat: float, elev_m: float) -> tuple[float, str]:

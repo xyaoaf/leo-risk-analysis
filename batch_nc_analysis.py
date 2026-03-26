@@ -149,20 +149,23 @@ def _worker(args):
         rk  = res["risk"]
         cl  = res["classification"]
         return {
-            "idx":           idx,
-            "location_id":   location_id,
-            "county_fips":   county_fips,
-            "lat":           lat,
-            "lon":           lon,
-            "feasible":      res["feasible"],
-            "failure_mode":  res.get("failure_mode", "unknown"),
-            "risk_score":    rk["risk_score"],
-            "risk_tier":     rk["risk_tier"],
-            "dominant":      cl["dominant"],
-            "slope_deg":     res.get("slope_deg"),
-            "canopy_max_m":  res.get("canopy_max_m"),
-            "building_count":res.get("building_count"),
-            "elapsed_s":     round(time.time() - t0, 1),
+            "idx":             idx,
+            "location_id":     location_id,
+            "county_fips":     county_fips,
+            "lat":             lat,
+            "lon":             lon,
+            "feasible":        res["feasible"],
+            "failure_mode":    res.get("failure_mode", "unknown"),
+            "mount_type":      res.get("mount_type", "ground"),
+            "risk_score":      rk["risk_score"],
+            "risk_tier":       rk["risk_tier"],
+            "dominant":        cl["dominant"],
+            "canopy_type":     res.get("canopy_type", "unknown"),
+            "evergreen_frac":  res.get("evergreen_frac"),
+            "slope_deg":       res.get("slope_deg"),
+            "canopy_max_m":    res.get("canopy_max_m"),
+            "building_count":  res.get("building_count"),
+            "elapsed_s":       round(time.time() - t0, 1),
         }
     except Exception as exc:
         return {
