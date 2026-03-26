@@ -17,7 +17,7 @@ The system has two modes:
 
 ```mermaid
 flowchart TD
-    U([User Query\ne.g. 'Analyze 30.28, -97.71']) --> A
+    U([User Query\ne.g. 'Analyze 35.06, -80.67']) --> A
 
     subgraph AGENT["Agent Layer (Claude claude-opus-4-6)"]
         A[Parse intent\nextract lat/lon] --> B{Tool needed?}
@@ -29,20 +29,28 @@ flowchart TD
     end
 
     subgraph PIPELINE["Geospatial Pipeline (deterministic Python)"]
-        T1 --> P1[fetch_terrain\nUSGS 3DEP via py3dep]
-        T1 --> P2[fetch_canopy\nMeta GCH via rasterio S3]
-        T1 --> P3[fetch_buildings\nMicrosoft ML Footprints]
-        P1 & P2 & P3 --> P4[build_obstruction_surface\nrasterize + resample + mask]
-        P4 --> P5[compute_horizon_profile\nradial ray-casting × 3 layers]
-        P5 --> P6[classify_obstruction\nterrain / vegetation / building / clear]
-        P6 --> P7[score_risk\n0–100 deterministic score]
+        direction TB
+        T1 --> P1[fetch_terrain\nUSGS 3DEP via py3dep\n1–10 m/px · 100 m + 1500 m radii]
+        T1 --> P2[fetch_canopy\nMeta Trees 1m GEE primary\n27m S3 fallback · 100 m radius]
+        T1 --> P3[fetch_buildings\nMicrosoft ML Footprints\nvector · 100 m radius]
+        P1 & P2 & P3 --> P4[build_obstruction_surface\nresample + rasterize + classify\nusable vs vegetation-blocked bldgs]
+        P4 --> P5[compute_horizon_profile\nvectorised ray-casting × 72 az\nterrain · canopy · full layers]
+        P5 --> P6[evaluate_constraints\nC_terrain_large · C_slope\nC_veg_at_point · C_vegetation\nC_building_nearby · C_roof_usable]
+        P6 --> FM[failure_mode\nregional_terrain · local_canopy\nlocal_building · local_terrain\nmixed · feasible]
+        FM --> P7[score_risk\n0–100 deterministic\nFOV blockage + severity + permanence]
+        FM -- not regional_terrain\nAND risk > 20 --> LS[find_better_nearby\ntwo-scale ring search\n10–15 m + 30–50 m\ndistance-penalised ranking]
+        LS --> P7
     end
 
     P7 --> R
-    S --> REPORT([Structured Report\nrisk_score, tier, explanation])
+    S --> REPORT([Structured Report\nfeasible · failure_mode\nrisk_score · tier · explanation\nbest_nearby if available])
 
-    style AGENT fill:#1a1a2e,color:#fff,stroke:#4a90d9
-    style PIPELINE fill:#0d1b2a,color:#fff,stroke:#27ae60
+    HI1([Human: provide coordinates]) -.-> U
+    HI2([Human: review canopy_simulated flag]) -.-> REPORT
+    HI3([Human: inspect per-point JSON\nin outputs/]) -.-> REPORT
+
+    style AGENT fill:#dbeafe,stroke:#1d4ed8,color:#1e3a5f
+    style PIPELINE fill:#dcfce7,stroke:#16a34a,color:#14532d
 ```
 
 ---
@@ -70,7 +78,7 @@ flowchart TD
 | Module | Data Source | Resolution | Coverage |
 |--------|-------------|------------|----------|
 | `fetch_terrain` | USGS 3DEP (via py3dep WMS) | 1–10 m/px | CONUS |
-| `fetch_canopy` | Meta Global Canopy Height (S3 COG) | ~27 m/px | Global |
+| `fetch_canopy` | **Primary:** Meta Trees 1m (GEE, Tolan et al. 2024) via `ee.data.computePixels`; **Fallback:** Meta ALSGEDI 27m (S3 COG) | 1 m/px (GEE) · 27 m/px (fallback) | Global |
 | `fetch_buildings` | Microsoft Global ML Footprints | Vector polygons | Global |
 | `build_obstruction_surface` | Derived: terrain + canopy + buildings | terrain grid | — |
 | `compute_horizon_profile` | Derived: radial ray-casting | 72 azimuths (5° steps) | — |
@@ -128,7 +136,8 @@ User response
 | Microsoft Buildings | `data/buildings/{quadkey9}.parquet` | Bing quadkey zoom-9 | Permanent (static dataset) |
 | Google Buildings | `data/buildings/google_{s2token}.parquet` | S2 level-4 token | Permanent |
 | Terrain (3DEP) | Not cached (py3dep handles internally) | — | Session |
-| Canopy (Meta) | Not cached (S3 window stream per call) | — | None |
+| Canopy 1m (GEE) | `data/tiles/canopy/gee1m_{lat}_{lon}_{radius}.tif` | lat/lon/radius at ~1 m precision | Permanent (LZW-compressed GeoTIFF) |
+| Canopy 27m (S3) | Not cached (streaming window read) | — | None |
 
 ---
 
@@ -148,11 +157,12 @@ can be re-loaded without re-fetching data.
 | Failure Mode | Behaviour |
 |---|---|
 | USGS 3DEP timeout | Retry up to 2× per resolution, then fall back to coarser (1→3→10→30 m/px). RuntimeError raised only if all resolutions fail. |
-| Meta canopy S3 missing tile | Falls through to simulation fallback (`simulated=True` flag set in result). |
+| GEE canopy unavailable (no creds/quota) | Falls back to Meta ALSGEDI 27m S3 stream. If S3 also fails, falls through to simulation fallback (`simulated=True` flag set in result). |
 | Microsoft Buildings tile not in index | Exception propagated; Google Open Buildings fallback attempted. |
 | Google Buildings returns 0 results | ValueError raised, agent reports empty buildings layer (not an error — some areas have no buildings). |
 | Complete pipeline failure for one point | Caught in `main.py`; point is skipped and logged; rest of batch continues. |
 | Agent tool call exception | Caught in agent loop; error JSON returned to Claude; Claude can retry or explain the failure to user. |
+| `failure_mode == "regional_terrain"` | Local search skipped automatically — moving 50 m cannot escape a far-field ridge. `failure_mode` field in result identifies root cause for downstream triage. |
 
 ---
 

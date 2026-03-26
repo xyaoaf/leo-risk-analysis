@@ -9,21 +9,26 @@ even at addresses providers have listed as "served."
 ## Quick Start
 
 ```bash
-# Clone + environment setup
 conda activate cs378
 
-# Run the 5-point Austin TX demo
+# Run the 5-point demo (Austin TX)
 conda run -n cs378 python main.py
+
+# Run batch analysis on NC dataset (~500 stratified points, 6 workers)
+conda run -n cs378 python batch_nc_analysis.py --workers 6 --pts-per-county 5
 
 # Run the Claude agent interactively
 export ANTHROPIC_API_KEY=sk-ant-...
-conda run -n cs378 python src/agent.py "Analyze Starlink risk at 30.2867, -97.7113"
+conda run -n cs378 python src/agent.py "Analyze Starlink risk at 35.06, -80.67"
 ```
 
 Outputs land in `outputs/`:
 - `point_{label}.png` — 3-panel visualization per location
 - `point_{label}.json` — risk score + obstruction breakdown JSON
 - `summary.png` — multi-point comparison chart
+- `batch/batch_results.csv` — full batch results
+- `batch/map_county_risk.png` — county-level choropleth
+- `batch/chart_tier_dist.png` — tier distribution summary
 
 ---
 
@@ -31,24 +36,29 @@ Outputs land in `outputs/`:
 
 ```
 leo_risk_analysis/
-├── main.py                    # Batch pipeline runner (5 Austin TX test points)
+├── main.py                    # Demo runner (5 Austin TX test points)
+├── batch_nc_analysis.py       # Stratified batch runner + county charts
+├── remake_maps.py             # Regenerate publication-ready EDA maps
 ├── src/
+│   ├── feasibility.py         # analyze_location() — orchestrator + constraints
 │   ├── agent.py               # Claude-orchestrated agent (tool_use loop)
 │   ├── scoring.py             # Deterministic 0–100 risk score
 │   └── tools/
-│       ├── terrain.py         # USGS 3DEP DEM fetcher
-│       ├── canopy.py          # Meta Global Canopy Height fetcher
-│       ├── buildings.py       # Microsoft / Google building footprints
-│       ├── surface.py         # Multi-layer obstruction surface builder
-│       └── horizon.py         # Radial ray-casting + obstruction classifier
+│       ├── terrain.py         # USGS 3DEP DEM (1m/3m/10m/30m ladder)
+│       ├── canopy.py          # Meta Trees 1m via GEE · 27m S3 fallback
+│       ├── buildings.py       # Microsoft ML Footprints (Google fallback)
+│       ├── surface.py         # Obstruction surface compositor
+│       └── horizon.py         # Vectorised ray-casting + classifier
 ├── docs/
 │   ├── ARCHITECTURE.md        # Mermaid diagram + component table
+│   ├── DESIGN.md              # Full algorithm specification
 │   ├── ANALYSIS_RATIONALE.md  # From install guide to methodology
 │   ├── DATA_SOURCES.md        # Dataset choices + quality issues
 │   └── CHALLENGE.md           # Original challenge specification
 ├── data/
-│   └── buildings/             # Cached building tile GeoParquets
-└── outputs/                   # Generated figures and JSON results
+│   ├── buildings/             # Cached building tile GeoParquets (by quadkey)
+│   └── tiles/canopy/          # Cached GEE 1m canopy GeoTIFFs
+└── outputs/                   # Generated figures, JSON results, batch CSVs
 ```
 
 ---
@@ -90,19 +100,30 @@ where both are sparse.
 
 ---
 
-### 3. 27m canopy resolution (not 1m)
+### 3. Canopy data source: GEE Meta Trees 1m (Tolan et al. 2024)
 
-**Decision**: Use the 27m Meta GCH tiles by default; 1m tiles are opt-in.
+**Decision**: Use the Meta Trees 1m product accessed via Google Earth Engine
+(`projects/sat-io/open-datasets/facebook/meta-canopy-height`) as primary canopy source.
+The 27m ALSGEDI S3 product is retained as a fallback.
 
-**Alternatives considered**: 1m tiles as default for maximum accuracy.
+**Alternatives considered**:
+- 27m S3 as primary (original implementation)
+- 1m S3 tiles as primary
 
-**Reasoning**: The 1m Meta tiles use strip layout (blockysize=1), not COG. Even a 200m window
-requires downloading ~12MB of interleaved strips, taking ~40s per location. At 1M locations
-this would add ~11,000 compute-hours.  The 27m product is a true COG; a 200m window streams
-in <1s.
+**Reasoning**: The 27m product is derived from GEDI satellite LiDAR (~25m footprints averaged
+to 27m pixels) — it has no genuine sub-30m spatial information. At a 100m analysis radius it
+resolves to only ~4×7 pixels, barely a texture. The 1m S3 tiles are not Cloud-Optimised
+(strip layout, blockysize=1) — streaming a 200m window takes ~40s.
 
-**What I'd revisit**: Locally cache and index the 1m tiles by quadkey for near-field analysis.
-At 100m radius, the 27m data resolves to only ~4×4 pixels — barely a texture.
+The GEE product (Tolan et al. 2024, *Remote Sensing of Environment*) is genuinely 1m, derived
+from Maxar satellite imagery using DiNOv2 vision features. Access via `ee.data.computePixels()`
+returns a 200×200 array in ~0.2s. Results are cached locally as GeoTIFFs so repeated calls
+are instant. **GEE licensing note**: prototype uses a personal non-profit GEE account;
+production deployment requires a commercial GEE license.
+
+**What I'd revisit**: The GEE dependency adds an authentication step (`earthengine authenticate`)
+and a cloud project requirement. For fully self-contained deployment, host the GEE tiles
+locally on object storage (GeoTIFF COGs served via a tile proxy).
 
 ---
 
@@ -137,23 +158,28 @@ at 20°N it becomes more equatorial.
 
 ---
 
-## Results (Austin TX Test Points)
+## Results (NC Dataset — DATA_CHALLENGE_50)
 
-| Location | Risk Score | Tier | Dominant | Max Angle |
+The provided dataset contains **4,674,917 NC addresses** across all 100 NC counties
+(FIPS 37xxx). A stratified sample of ~5 points per county (~500 total) was analyzed
+to produce state-wide risk statistics. Full results in `outputs/batch/`.
+
+**8-point validation sample** (geographically spread across NC):
+
+| Location | Risk Score | Tier | Dominant | Canopy Max |
 |---|---|---|---|---|
-| Austin-Suburban (30.2867, -97.7113) | 0.0 | low | clear | 5.7° |
-| Austin-Urban-Core (30.2943, -97.7000) | 0.0 | low | clear | 19.3° |
-| Austin-West (30.2798, -97.7557) | 0.0 | low | clear | 4.1° |
-| Austin-Far-West (30.3042, -97.7981) | 0.0 | low | clear | 14.5° |
-| North-Austin (30.3222, -97.7747) | 12.9 | low | vegetation | 37.7° |
+| Charlotte-Suburban | 90.2 | critical | vegetation | 27 m |
+| Harnett-County | 90.0 | critical | vegetation | 25 m |
+| Jones-County-Coast | 7.2 | low | clear | 19 m |
+| Rowan-County | 0.0 | low | clear | 19 m |
+| Lincoln-County | 0.0 | low | clear | 3 m |
+| Gaston-County | 0.0 | low | clear | 20 m |
+| Iredell-County | 0.0 | low | clear | 22 m |
+| Davidson-County | 0.0 | low | clear | 23 m |
 
-North-Austin is the only point that approaches a meaningful obstruction: the canopy there
-reaches 37.7° max elevation angle, classified as vegetation-dominant. The 12.9/100 risk score
-reflects that this affects only a small fraction of the Starlink FOV and is seasonal (deciduous
-canopy, permanence factor 0.6).
-
-The "clear" results for the other four points are geographically accurate — central Austin is
-relatively flat and the test radii (100m near-field, 1500m far-field) capture the key obstructions.
+Critical-tier sites (Charlotte, Harnett) have dense tree canopy (25–27 m) at the dish
+location. The 1m GEE canopy source is essential for these results — the prior 27m product
+returned 0 m canopy at these same locations due to insufficient spatial resolution.
 
 ---
 
@@ -167,8 +193,9 @@ To run on the full 1M-location dataset:
    `(z, x, y)` to avoid re-fetching overlapping areas.
 3. **Building tiles**: Already cached as GeoParquet per quadkey. 1M US locations cover ~120K
    unique zoom-9 quadkeys; pre-fetch tiles by state/county.
-4. **Canopy tiles**: Stream-read is fast for 27m product; no caching needed unless running
-   many points in the same 10° tile (batch the reads).
+4. **Canopy tiles (GEE 1m)**: Results are cached as GeoTIFFs under `data/tiles/canopy/`.
+   Cold calls ~0.2s; cached calls instant. For 1M locations most unique 100m windows will
+   not overlap — expect full GEE quota consumption; use batch quotas or pre-cache by county.
 5. **Parallelism bound**: 3DEP WMS has a rate limit (~10 concurrent requests). Use a semaphore.
 
 Estimated throughput at full scale: ~500 locations/hour single-threaded → ~5,000/hour with
