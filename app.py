@@ -12,7 +12,10 @@ Usage:
     # Then open http://localhost:8000 in a browser
 
 Design:
-    - All analysis runs synchronously in-process (simple, no task queue)
+    - Analysis runs asynchronously: endpoints return a job_id immediately (HTTP 202)
+      and the client polls GET /api/status/{job_id} until status == "done" | "error".
+    - Analysis work runs in a thread pool (ThreadPoolExecutor) so it does not block
+      the asyncio event loop — the server remains responsive during long analyses.
     - Pre-computed results served from challenge50 + nc_test JSON files
     - Nearest-point lookup uses vectorised numpy distance (no spatial index needed
       for <5M points once loaded; first request cold-loads the CSV in ~5s)
@@ -23,19 +26,24 @@ Design:
 Endpoints:
     GET  /                        — interactive map HTML
     GET  /api/precomputed         — all pre-computed results (JSON)
-    POST /api/analyze             — single-point on-demand analysis
-    POST /api/analyze_bbox        — batch analysis for a drawn bounding box
+    POST /api/analyze             — single-point on-demand analysis (async, returns job_id)
+    GET  /api/status/{job_id}     — poll job status / retrieve result
+    POST /api/analyze_bbox        — batch analysis for a drawn bounding box (async)
+    GET  /api/nearest             — nearest DATA_CHALLENGE_50 point lookup
     GET  /outputs/{path:path}     — serve PNG / JSON files from outputs/
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
 import logging
 import sys
 import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +88,12 @@ templates = Jinja2Templates(directory=str(TMPL_DIR))
 # ---------------------------------------------------------------------------
 _challenge_df: pd.DataFrame | None = None   # 4.67M NC addresses (lazy)
 _precomputed:  list[dict]  | None = None    # challenge50 + nc_test results
+
+# Async job store: job_id → {status, result?, error?, ...}
+_jobs: dict[str, dict] = {}
+
+# Thread pool for CPU/network-bound analysis work (keeps asyncio loop unblocked)
+_analysis_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis")
 
 AOI_CONFIRMATION_THRESHOLD = 100   # Points above this require explicit confirm
 
@@ -222,6 +236,76 @@ def _png_b64(result: dict, location_id: str) -> str:
     return base64.b64encode(png_bytes).decode()
 
 
+def _save_analysis_result(result: dict, location_id: str):
+    """Persist JSON + PNG for a completed analysis result (sync, safe to run in executor)."""
+    json_path = OUT_DIR / "reports" / location_id / f"{location_id}.json"
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    _main_mod._save_json(result, json_path)
+    _png_b64(result, location_id)
+
+
+async def _run_analysis_job(job_id: str, lat: float, lon: float,
+                             location_id: str, run_search: bool):
+    """Background coroutine: run analyze_location in the thread pool, store result."""
+    loop = asyncio.get_event_loop()
+    t0   = time.time()
+    try:
+        result = await loop.run_in_executor(
+            _analysis_pool,
+            lambda: analyze_location(lat, lon, run_local_search=run_search),
+        )
+        await loop.run_in_executor(
+            _analysis_pool,
+            lambda: _save_analysis_result(result, location_id),
+        )
+        api_result = _result_to_api(result, location_id)
+        api_result["total_elapsed_s"] = round(time.time() - t0, 1)
+        _jobs[job_id] = {"status": "done", "result": api_result}
+        global _precomputed
+        _precomputed = None
+        logger.info(f"[job:{job_id}] done in {time.time()-t0:.1f}s")
+    except Exception as exc:
+        logger.error(f"[job:{job_id}] failed: {exc}")
+        _jobs[job_id] = {"status": "error", "error": str(exc)}
+
+
+async def _run_bbox_job(job_id: str, subset: pd.DataFrame):
+    """Background coroutine: run bbox batch analysis point-by-point in thread pool."""
+    loop     = asyncio.get_event_loop()
+    n        = len(subset)
+    results_out: list[dict] = []
+    errors:      list[dict] = []
+
+    for i, (_, row) in enumerate(subset.iterrows(), 1):
+        lid = str(row["location_id"])
+        _jobs[job_id]["completed"] = i - 1
+        try:
+            res = await loop.run_in_executor(
+                _analysis_pool,
+                lambda r=row: analyze_location(
+                    float(r["latitude"]), float(r["longitude"]), run_local_search=False
+                ),
+            )
+            await loop.run_in_executor(
+                _analysis_pool,
+                lambda r=res, l=lid: _save_analysis_result(r, l),
+            )
+            results_out.append(_result_to_api(res, lid, source="aoi_batch"))
+        except Exception as exc:
+            errors.append({"location_id": lid, "error": str(exc)})
+
+    _jobs[job_id].update({
+        "status":   "done",
+        "completed": n,
+        "results":  results_out,
+        "errors":   errors,
+        "n_points": n,
+    })
+    global _precomputed
+    _precomputed = None
+    logger.info(f"[bbox_job:{job_id}] done — {len(results_out)}/{n} ok, {len(errors)} errors")
+
+
 def _result_to_api(result: dict, location_id: str, source: str = "on-demand") -> dict:
     """Strip numpy arrays and add API-friendly fields."""
     rk  = result.get("risk", {})
@@ -299,35 +383,38 @@ async def get_precomputed():
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest):
     """
-    On-demand single-point analysis.
+    On-demand single-point analysis — returns a job_id immediately (HTTP 202).
 
-    Typically called after a map click: the frontend first looks up the nearest
-    DATA_CHALLENGE_50 point via /api/nearest and passes it here.
+    The client should poll GET /api/status/{job_id} until status == "done" or "error".
+    Analysis runs in a background thread so the event loop stays unblocked.
     """
-    t0 = time.time()
     logger.info(f"[api/analyze] lat={req.lat:.5f} lon={req.lon:.5f} id={req.location_id}")
-    try:
-        result = analyze_location(req.lat, req.lon, run_local_search=req.run_search)
-    except Exception as exc:
-        logger.error(f"[api/analyze] failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "pending", "location_id": req.location_id,
+                     "lat": req.lat, "lon": req.lon}
+    asyncio.create_task(
+        _run_analysis_job(job_id, req.lat, req.lon, req.location_id, req.run_search)
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "status": "pending", "location_id": req.location_id},
+    )
 
-    # Save JSON
-    json_path = OUT_DIR / "reports" / req.location_id / f"{req.location_id}.json"
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    _main_mod._save_json(result, json_path)
 
-    # Generate PNG
-    _png_b64(result, req.location_id)
+@app.get("/api/status/{job_id}")
+async def job_status(job_id: str):
+    """
+    Poll the status of a background analysis job.
 
-    api_result = _result_to_api(result, req.location_id)
-    api_result["total_elapsed_s"] = round(time.time() - t0, 1)
-
-    # Invalidate precomputed cache so new result appears immediately
-    global _precomputed
-    _precomputed = None
-
-    return JSONResponse(content=api_result)
+    Returns:
+        pending  — job is queued or running
+        done     — job complete; "result" key holds the analysis output
+        error    — job failed; "error" key holds the exception message
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    return JSONResponse(content=job)
 
 
 @app.get("/api/nearest")
@@ -344,9 +431,12 @@ async def analyze_bbox(req: BboxRequest):
     """
     Batch analysis for an AOI bounding box drawn on the map.
 
-    Safety gate: if the bbox contains > AOI_CONFIRMATION_THRESHOLD points and
-    confirmed=False, return a 202 with the point count so the frontend can show
-    a confirmation dialog before re-submitting with confirmed=True.
+    Flow:
+      1. If bbox > threshold and confirmed=False → return confirmation_required (200, not 202)
+         so the frontend can show a dialog, then re-submit with confirmed=True.
+      2. Otherwise → start async job, return job_id immediately (HTTP 202 with status="running").
+      3. Client polls GET /api/status/{job_id}; the job dict includes "completed" / "total"
+         for live progress display.
     """
     df = _load_challenge_df()
     mask = (
@@ -360,52 +450,35 @@ async def analyze_bbox(req: BboxRequest):
         return JSONResponse(content={"status": "empty", "n_points": 0, "results": []})
 
     if n > AOI_CONFIRMATION_THRESHOLD and not req.confirmed:
+        # Use HTTP 200 so the frontend can inspect status field without re-parsing 202
         return JSONResponse(
-            status_code=202,
+            status_code=200,
             content={
                 "status":    "confirmation_required",
                 "n_points":  n,
                 "threshold": AOI_CONFIRMATION_THRESHOLD,
                 "message":   (
-                    f"This AOI contains {n:,} points, which would take "
-                    f"~{n * 30 // 60} minutes to analyse. "
+                    f"This AOI contains {n:,} points (~{n * 30 // 60} min). "
                     f"Re-submit with confirmed=true to proceed."
                 ),
             },
         )
 
-    # Cap to threshold even with confirmation (user confirmed they want the run)
+    # Cap to threshold
     if n > AOI_CONFIRMATION_THRESHOLD:
         subset = subset.sample(AOI_CONFIRMATION_THRESHOLD, random_state=42)
-        logger.info(f"[api/analyze_bbox] Sampled {AOI_CONFIRMATION_THRESHOLD} of {n} points")
         n = AOI_CONFIRMATION_THRESHOLD
+        logger.info(f"[api/analyze_bbox] Sampled {AOI_CONFIRMATION_THRESHOLD} pts")
 
-    logger.info(f"[api/analyze_bbox] Running {n} points …")
-    results_out = []
-    errors      = []
-    for _, row in subset.iterrows():
-        lid = str(row["location_id"])
-        try:
-            res = analyze_location(float(row["latitude"]), float(row["longitude"]),
-                                   run_local_search=False)
-            json_path = OUT_DIR / "reports" / lid / f"{lid}.json"
-            json_path.parent.mkdir(parents=True, exist_ok=True)
-            _main_mod._save_json(res, json_path)
-            _png_b64(res, lid)
-            results_out.append(_result_to_api(res, lid, source="aoi_batch"))
-        except Exception as exc:
-            errors.append({"location_id": lid, "error": str(exc)})
+    job_id = uuid.uuid4().hex[:12]
+    _jobs[job_id] = {"status": "running", "total": n, "completed": 0}
+    logger.info(f"[api/analyze_bbox] job={job_id} n={n}")
+    asyncio.create_task(_run_bbox_job(job_id, subset))
 
-    # Invalidate precomputed cache
-    global _precomputed
-    _precomputed = None
-
-    return JSONResponse(content={
-        "status":   "complete",
-        "n_points": n,
-        "results":  results_out,
-        "errors":   errors,
-    })
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job_id, "status": "running", "n_points": n},
+    )
 
 
 @app.get("/outputs/{path:path}")

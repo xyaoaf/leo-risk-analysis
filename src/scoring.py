@@ -49,13 +49,17 @@ _TIER_THRESHOLDS = [
 ]
 
 
-def score_risk(classification: dict) -> dict:
+def score_risk(classification: dict, evergreen_fraction: float | None = None) -> dict:
     """
     Convert an obstruction classification dict to a 0–100 risk score.
 
     Parameters
     ----------
-    classification : output of horizon.classify_obstruction()
+    classification      : output of horizon.classify_obstruction()
+    evergreen_fraction  : optional float 0–1 for vegetation-dominant locations.
+                          0 = fully deciduous (loses leaves in winter, lower permanence),
+                          1 = fully coniferous (year-round blockage, higher permanence).
+                          If None, defaults to the fixed 0.6 blended value from _PERMANENCE.
 
     Returns
     -------
@@ -93,6 +97,11 @@ def score_risk(classification: dict) -> dict:
 
     # ── Component 3: Permanence penalty ────────────────────────────────────
     perm_factor = _PERMANENCE.get(dominant, 0.5)
+    # For vegetation, adjust permanence by evergreen fraction when available.
+    # Formula: 0.35 (fully deciduous) → 0.90 (fully evergreen).
+    # Default _PERMANENCE["vegetation"] = 0.60 ≈ 46% evergreen (blended SE US).
+    if dominant == "vegetation" and evergreen_fraction is not None:
+        perm_factor = 0.35 + 0.55 * float(evergreen_fraction)
     # Scale by blockage so "vegetation with 0% blockage" still scores 0
     perm_score  = perm_factor * min(bf * 40.0, 20.0)   # cap at 20
 

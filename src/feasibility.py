@@ -229,7 +229,14 @@ def analyze_location(
     # Using hz_far (1500 m) here was a bug: a far-field ridge raises bf_t above
     # bf_c, making canopy_contrib negative (clamped to 0), hiding real vegetation.
     classification = classify_obstruction(hz_terrain, hz_canopy, hz_full, n_az)
-    risk           = score_risk(classification)
+
+    # Estimate vegetation seasonality from elevation + latitude.
+    # Higher elevation / higher latitude → more deciduous → lower evergreen fraction.
+    # Used by scoring to adjust the permanence penalty for vegetation-dominant sites.
+    elev_m = float(np.nanmedian(S_terrain))
+    evergreen_frac, canopy_type = _estimate_canopy_type(lat, elev_m)
+
+    risk = score_risk(classification, evergreen_fraction=evergreen_frac)
 
     # ── 9. Optional local search ────────────────────────────────────────────
     # Change B: skip local search when far-field terrain is the dominant cause —
@@ -265,6 +272,8 @@ def analyze_location(
         "failure_mode":    failure_mode,
         "on_building":     on_building,
         "mount_type":      "rooftop" if on_building else "ground",
+        "canopy_type":     canopy_type,
+        "evergreen_frac":  round(evergreen_frac, 2),
         "dish_height_asl_m": round(h_dish, 1),
         "constraints":     C,
         "horizon": {
@@ -690,6 +699,49 @@ def _haversine_m(lat1, lon1, lat2, lon2) -> float:
            + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2))
            * np.sin(dlon / 2) ** 2)
     return R * 2 * np.arcsin(np.sqrt(a))
+
+
+def _estimate_canopy_type(lat: float, elev_m: float) -> tuple[float, str]:
+    """
+    Estimate vegetation evergreen fraction and canopy type from latitude + elevation.
+
+    This is a simple heuristic based on broad US forest composition patterns:
+      - Low elevation coastal plain (Southeast US): longleaf/loblolly pine → high evergreen
+      - Mid-elevation piedmont: mixed pine/hardwood → moderate evergreen
+      - High elevation / high latitude: deciduous hardwood (oak, maple) → low evergreen
+
+    Returns
+    -------
+    (evergreen_fraction, canopy_type)
+      evergreen_fraction : float 0–1 (0 = fully deciduous, 1 = fully coniferous)
+      canopy_type        : "conifer" | "mixed" | "deciduous" | "unknown"
+    """
+    if elev_m < 0 or np.isnan(elev_m):
+        return 0.5, "unknown"
+
+    # Base fraction from elevation (higher → more deciduous)
+    if elev_m < 150:
+        base = 0.75   # coastal plain — pine flatwoods (SE US)
+    elif elev_m < 500:
+        base = 0.55   # piedmont — mixed pine-hardwood
+    elif elev_m < 1000:
+        base = 0.40   # montane — mostly deciduous hardwood
+    else:
+        base = 0.45   # subalpine — spruce/fir mix returns
+
+    # Latitude adjustment: higher latitude → more deciduous
+    # CONUS range ~25°–50°N; at 50°N fully deciduous
+    lat_factor = max(0.0, min(1.0, (lat - 25.0) / 25.0))   # 0 at 25°N, 1 at 50°N
+    ev_frac = max(0.1, base - 0.20 * lat_factor)
+
+    if ev_frac >= 0.65:
+        canopy_type = "conifer"
+    elif ev_frac >= 0.38:
+        canopy_type = "mixed"
+    else:
+        canopy_type = "deciduous"
+
+    return round(ev_frac, 2), canopy_type
 
 
 def _explain_improvement(origin: dict, best: dict) -> str:

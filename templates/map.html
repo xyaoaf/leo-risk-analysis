@@ -342,7 +342,21 @@ async function loadPrecomputed() {
   }
 }
 
-// ── Click-anywhere → nearest point → analyse ───────────────────────────────
+// ── Job polling helper ──────────────────────────────────────────────────────
+// Polls /api/status/{jobId} every intervalMs until status is "done" or "error".
+// Calls onProgress(job) on each tick so the UI can show live progress.
+async function pollJob(jobId, intervalMs, onProgress) {
+  while (true) {
+    await new Promise(r => setTimeout(r, intervalMs));
+    const res = await fetch(`/api/status/${jobId}`);
+    if (!res.ok) throw new Error(`Status poll failed (${res.status})`);
+    const job = await res.json();
+    if (onProgress) onProgress(job);
+    if (job.status === 'done' || job.status === 'error') return job;
+  }
+}
+
+// ── Click-anywhere → nearest point → analyse (async job) ───────────────────
 map.on('click', async (e) => {
   const { lat, lng } = e.latlng;
   showSpinner('Looking up nearest address…');
@@ -355,18 +369,29 @@ map.on('click', async (e) => {
     setStatus(`Nearest: ${nearest.location_id} (${nearest.dist_m?.toFixed(0)} m away). Analysing…`);
     showSpinner(`Analysing ${nearest.location_id}…`);
 
+    // POST to /api/analyze — returns job_id immediately (202)
     const anaRes = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lat: nearest.lat, lon: nearest.lon, location_id: nearest.location_id }),
     });
     if (!anaRes.ok) throw new Error(await anaRes.text());
-    const result = await anaRes.json();
+    const { job_id } = await anaRes.json();
 
-    const m = addMarker(result, 'on-demand');
+    // Poll until done
+    let elapsed = 0;
+    const job = await pollJob(job_id, 2000, (j) => {
+      elapsed += 2;
+      showSpinner(`Analysing ${nearest.location_id}… (${elapsed}s)`);
+    });
+
+    if (job.status === 'error') throw new Error(job.error);
+
+    const result = job.result;
+    addMarker(result, 'on-demand');
     showResult(result, `On-demand (${nearest.dist_m?.toFixed(0)} m from click)`);
     map.panTo([result.lat, result.lon]);
-    setStatus(`Analysis complete: ${result.risk_tier.toUpperCase()} ${result.risk_score?.toFixed(0)}/100 (${result.elapsed_s} s)`);
+    setStatus(`Analysis complete: ${result.risk_tier.toUpperCase()} ${result.risk_score?.toFixed(0)}/100 (${result.total_elapsed_s} s)`);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
     console.error(err);
@@ -400,9 +425,10 @@ async function runAoiBatch(bbox) {
       body: JSON.stringify(bbox),
     });
 
-    if (res.status === 202) {
-      // Confirmation required
-      const data = await res.json();
+    const data = await res.json();
+
+    // Confirmation gate (server returns 200 with status=confirmation_required)
+    if (data.status === 'confirmation_required') {
       hideSpinner();
       pendingBbox = { ...bbox, confirmed: true };
       document.getElementById('confirm-msg').textContent = data.message;
@@ -410,17 +436,30 @@ async function runAoiBatch(bbox) {
       return;
     }
 
-    const data = await res.json();
     if (data.status === 'empty') {
       setStatus('No data points in selected area.');
       hideSpinner();
       return;
     }
 
-    setStatus(`AOI batch: ${data.n_points} points complete`);
-    data.results.forEach(r => addMarker(r, 'aoi-batch'));
-    showBatchResults(data.results);
-    if (data.errors.length) console.warn('Batch errors:', data.errors);
+    // Job started (status=running, job_id present) — poll for completion
+    const { job_id, n_points } = data;
+    showSpinner(`AOI batch: 0 / ${n_points} points…`);
+    setStatus(`AOI batch started (${n_points} pts, job ${job_id})…`);
+
+    const job = await pollJob(job_id, 3000, (j) => {
+      const done = j.completed || 0;
+      const total = j.total || n_points;
+      showSpinner(`AOI batch: ${done} / ${total} points…`);
+      setStatus(`AOI batch running: ${done}/${total} complete…`);
+    });
+
+    if (job.status === 'error') throw new Error(job.error || 'Batch failed');
+
+    setStatus(`AOI batch: ${job.n_points} points complete`);
+    job.results.forEach(r => addMarker(r, 'aoi-batch'));
+    showBatchResults(job.results);
+    if (job.errors?.length) console.warn('Batch errors:', job.errors);
   } catch (err) {
     setStatus(`Batch error: ${err.message}`);
     console.error(err);
