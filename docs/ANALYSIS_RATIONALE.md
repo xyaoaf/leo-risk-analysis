@@ -103,9 +103,11 @@ risk = FOV_blockage_score   (0–50)   # fraction of FOV azimuths blocked × 50
 
 | Limitation | Impact | Mitigation |
 |---|---|---|
-| Canopy resolution ~27m/px | Individual trees not resolved; cluster-level accuracy only | Use 1m Meta tiles locally (opt-in flag) |
+| ~~Canopy resolution ~27m/px~~ → **now 1m** | ~~Individual trees not resolved~~ → now resolved at tree-crown level (Tolan et al. 2024 via GEE) | GEE Meta Trees 1m is now primary; 27m retained as fallback |
+| GEE authentication required | Pipeline needs `earthengine authenticate` + a GEE project; not fully offline | `GEE_PROJECT` env var; 27m S3 fallback if GEE unavailable |
+| GEE commercial license for production | Personal non-profit GEE account used for prototype | Production deployment requires a commercial GEE license |
 | No leaf-on/leaf-off distinction | Deciduous trees may be over- or under-counted | Apply permanence factor × 0.6 for vegetation |
-| Buildings assumed mountable | Dish may not actually be installable on all detected rooftops | `blocked` flag excludes buildings with tree cover |
+| Buildings assumed mountable | Dish may not actually be installable on all detected rooftops | `blocked` flag excludes buildings with tree cover; vegetation-blocked rooftops now surface as degraded candidates (not hard-fail) |
 | 3DEP USGS coverage | Only CONUS; international locations fall back to 30m SRTM | Acceptable for the challenge's US-focused dataset |
 | Dish height fixed at 3m | Actual mounting varies; rooftop mounts can be 5–10m | User-configurable `dish_height_m` parameter |
 | No real-time satellite visibility | Analysis assumes full orbital coverage; outages during passes not modeled | Out of scope for static risk assessment |
