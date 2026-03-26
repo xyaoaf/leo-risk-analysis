@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import folium
 from folium.plugins import MarkerCluster
@@ -240,6 +242,76 @@ def _stats_box_html(datasets: list[tuple[str, list[dict]]]) -> str:
 """
 
 
+# ── County choropleth helpers ─────────────────────────────────────────────────
+
+def _load_nc_counties_geojson() -> dict | None:
+    """Load NC county boundaries as raw GeoJSON dict (for Folium choropleth)."""
+    bd = ROOT / "data" / "boundaries"
+    bd.mkdir(parents=True, exist_ok=True)
+    fp = bd / "us_counties_fips.geojson"
+    if not fp.exists():
+        url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                fp.write_bytes(r.read())
+        except Exception as e:
+            print(f"  Could not download county boundaries: {e}")
+            return None
+    full = json.loads(fp.read_text())
+    # Filter to NC (FIPS starting with "37")
+    nc_features = [f for f in full["features"]
+                   if str(f.get("id", "")).startswith("37")]
+    return {"type": "FeatureCollection", "features": nc_features}
+
+
+def _county_summary_from_rows(rows: list[dict]) -> pd.DataFrame:
+    """Compute per-county mean risk and % infeasible from batch result rows."""
+    df = pd.DataFrame(rows)
+    if df.empty or "county_fips" not in df.columns:
+        return pd.DataFrame()
+    grp = df.groupby("county_fips").agg(
+        mean_risk=("risk_score", "mean"),
+        pct_infeasible=("feasible", lambda s: (1 - s.mean()) * 100),
+        n_points=("risk_score", "count"),
+    ).reset_index()
+    grp["mean_risk"] = grp["mean_risk"].round(1)
+    grp["pct_infeasible"] = grp["pct_infeasible"].round(1)
+    return grp
+
+
+def _add_choropleth(m: folium.Map, geojson: dict, summary: pd.DataFrame):
+    """Add a county-level choropleth overlay to the Folium map."""
+    # Mean risk choropleth
+    folium.Choropleth(
+        geo_data=geojson,
+        data=summary,
+        columns=["county_fips", "mean_risk"],
+        key_on="feature.id",
+        fill_color="RdYlGn_r",
+        fill_opacity=0.45,
+        line_opacity=0.3,
+        nan_fill_opacity=0.05,
+        legend_name="Mean Risk Score (0–100)",
+        name="County: Mean Risk",
+        show=False,
+    ).add_to(m)
+
+    # % infeasible choropleth
+    folium.Choropleth(
+        geo_data=geojson,
+        data=summary,
+        columns=["county_fips", "pct_infeasible"],
+        key_on="feature.id",
+        fill_color="Reds",
+        fill_opacity=0.45,
+        line_opacity=0.3,
+        nan_fill_opacity=0.05,
+        legend_name="% Infeasible Locations",
+        name="County: % Infeasible",
+        show=False,
+    ).add_to(m)
+
+
 # ── Map builder ───────────────────────────────────────────────────────────────
 
 def build_map(c50_rows: list[dict], nc_test_rows: list[dict],
@@ -284,6 +356,15 @@ def build_map(c50_rows: list[dict], nc_test_rows: list[dict],
 
     for g in tier_groups.values():
         g.add_to(m)
+
+    # County choropleth overlays (only when batch data with county_fips is available)
+    if batch_rows and any("county_fips" in r for r in batch_rows):
+        geojson = _load_nc_counties_geojson()
+        if geojson:
+            summary = _county_summary_from_rows(batch_rows)
+            if not summary.empty:
+                _add_choropleth(m, geojson, summary)
+
     folium.LayerControl(collapsed=False).add_to(m)
 
     m.get_root().html.add_child(folium.Element(_stats_box_html(datasets)))

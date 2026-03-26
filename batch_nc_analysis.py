@@ -131,7 +131,7 @@ def stratified_sample(df: pd.DataFrame, pts_per_county: int = 5,
 
 def _worker(args):
     """Top-level function for ProcessPoolExecutor (must be picklable)."""
-    idx, lat, lon, location_id, county_fips, start_delay_s = args
+    idx, lat, lon, location_id, county_fips, start_delay_s, save_png = args
     # Stagger worker startup to avoid simultaneous bursts to the 3DEP WMS
     # endpoint, which returns errors when hit with many concurrent requests.
     if start_delay_s > 0:
@@ -146,6 +146,19 @@ def _worker(args):
     t0 = time.time()
     try:
         res = analyze_location(lat, lon, run_local_search=False)
+        # Generate per-point PNG if requested (while full result is in memory)
+        if save_png:
+            try:
+                import matplotlib
+                matplotlib.use("Agg")
+                sys.path.insert(0, str(Path(__file__).parent))
+                import main as _main_mod
+                png_dir = Path(__file__).parent / "outputs" / "batch" / "pngs"
+                png_dir.mkdir(parents=True, exist_ok=True)
+                res["label"] = location_id
+                _main_mod._plot_point(res, png_dir / f"{location_id}.png")
+            except Exception as png_exc:
+                log.warning(f"#{idx} PNG generation failed: {png_exc}")
         rk  = res["risk"]
         cl  = res["classification"]
         return {
@@ -184,7 +197,8 @@ def _worker(args):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_batch(sample: pd.DataFrame, n_workers: int = 2,
-              incremental_csv: Path | None = None) -> list[dict]:
+              incremental_csv: Path | None = None,
+              save_pngs: bool = False) -> list[dict]:
     # Default workers reduced from 6 → 2.  The USGS 3DEP WMS endpoint rejects
     # concurrent bursts; 2 workers limits simultaneous terrain requests to 4
     # (2 far + 2 near), which the API handles reliably.  Each worker is also
@@ -196,7 +210,8 @@ def run_batch(sample: pd.DataFrame, n_workers: int = 2,
     tasks = [
         (i, float(row["latitude"]), float(row["longitude"]),
          str(row["location_id"]), str(row["county_fips"]),
-         (i - 1) % n_workers * 8)   # start_delay_s: 0s or 8s per slot
+         (i - 1) % n_workers * 8,   # start_delay_s: 0s or 8s per slot
+         save_pngs)
         for i, (_, row) in enumerate(sample.iterrows(), 1)
     ]
     n = len(tasks)
@@ -276,6 +291,7 @@ def county_summary(results: list[dict]) -> pd.DataFrame:
     ok = pd.DataFrame([r for r in results if "error" not in r])
     if ok.empty:
         return pd.DataFrame()
+    ok["county_fips"] = ok["county_fips"].astype(str).str.zfill(5)
     grp = ok.groupby("county_fips").agg(
         n_points=("risk_score", "count"),
         mean_risk=("risk_score", "mean"),
@@ -599,6 +615,9 @@ Examples:
     parser.add_argument("--skip-pipeline",  action="store_true",
                         help="Skip pipeline entirely; load existing results CSV and "
                              "regenerate maps only.")
+    parser.add_argument("--save-pngs",     action="store_true",
+                        help="Generate a per-point 5-panel PNG diagnostic image "
+                             "for each location. Saved to outputs/batch/pngs/.")
     args = parser.parse_args()
 
     results_csv = OUTPUT_DIR / "batch_results.csv"
@@ -637,7 +656,8 @@ Examples:
             incremental_csv.unlink()  # start fresh for this run
 
         results = run_batch(sample, n_workers=args.workers,
-                            incremental_csv=incremental_csv)
+                            incremental_csv=incremental_csv,
+                            save_pngs=args.save_pngs)
 
         # Save final consolidated CSV (sorted by original sample order)
         pd.DataFrame(results).to_csv(results_csv, index=False)

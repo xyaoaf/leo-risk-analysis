@@ -50,6 +50,7 @@ import argparse
 import json
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -119,6 +120,129 @@ def filter_by_geojson(df: pd.DataFrame, geojson_path: str) -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# County name → FIPS lookup
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_NC_COUNTY_FIPS: dict[str, str] | None = None
+
+
+def _load_nc_county_fips() -> dict[str, str]:
+    """Return {lowercase_county_name: 5-digit FIPS} for all NC counties.
+
+    Uses the Census Bureau county FIPS CSV (downloaded once and cached).
+    """
+    global _NC_COUNTY_FIPS
+    if _NC_COUNTY_FIPS is not None:
+        return _NC_COUNTY_FIPS
+
+    cache_dir = ROOT / "data" / "boundaries"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fp = cache_dir / "nc_county_fips.json"
+
+    if fp.exists():
+        _NC_COUNTY_FIPS = json.loads(fp.read_text())
+        return _NC_COUNTY_FIPS
+
+    # Download Census county FIPS listing
+    url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
+    print("Downloading county boundaries for name lookup …", end=" ", flush=True)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        print(f"FAILED: {e}")
+        print("Falling back to FIPS extraction from dataset geoid_cb.")
+        _NC_COUNTY_FIPS = {}
+        return _NC_COUNTY_FIPS
+
+    # Extract NC counties and their names from GeoJSON properties
+    mapping = {}
+    for feat in data["features"]:
+        fips = str(feat.get("id", ""))
+        if fips.startswith("37"):
+            # GeoJSON properties may have "NAME" or we derive from FIPS
+            name = feat.get("properties", {}).get("NAME", "")
+            if name:
+                mapping[name.lower()] = fips
+    # If GeoJSON didn't have NAME property, use a hardcoded NC list
+    if not mapping:
+        mapping = _hardcoded_nc_counties()
+
+    fp.write_text(json.dumps(mapping, indent=2))
+    print(f"OK ({len(mapping)} counties)")
+    _NC_COUNTY_FIPS = mapping
+    return _NC_COUNTY_FIPS
+
+
+def _hardcoded_nc_counties() -> dict[str, str]:
+    """Fallback: hardcoded NC county name → FIPS mapping (100 counties)."""
+    # Source: US Census Bureau FIPS codes for North Carolina (state=37)
+    counties = {
+        "alamance": "37001", "alexander": "37003", "alleghany": "37005",
+        "anson": "37007", "ashe": "37009", "avery": "37011",
+        "beaufort": "37013", "bertie": "37015", "bladen": "37017",
+        "brunswick": "37019", "buncombe": "37021", "burke": "37023",
+        "cabarrus": "37025", "caldwell": "37027", "camden": "37029",
+        "carteret": "37031", "caswell": "37033", "catawba": "37035",
+        "chatham": "37037", "cherokee": "37039", "chowan": "37041",
+        "clay": "37043", "cleveland": "37045", "columbus": "37047",
+        "craven": "37049", "cumberland": "37051", "currituck": "37053",
+        "dare": "37055", "davidson": "37057", "davie": "37059",
+        "duplin": "37061", "durham": "37063", "edgecombe": "37065",
+        "forsyth": "37067", "franklin": "37069", "gaston": "37071",
+        "gates": "37073", "graham": "37075", "granville": "37077",
+        "greene": "37079", "guilford": "37081", "halifax": "37083",
+        "harnett": "37085", "haywood": "37087", "henderson": "37089",
+        "hertford": "37091", "hoke": "37093", "hyde": "37095",
+        "iredell": "37097", "jackson": "37099", "johnston": "37101",
+        "jones": "37103", "lee": "37105", "lenoir": "37107",
+        "lincoln": "37109", "macon": "37113", "madison": "37115",
+        "martin": "37117", "mcdowell": "37111", "mecklenburg": "37119",
+        "mitchell": "37121", "montgomery": "37123", "moore": "37125",
+        "nash": "37127", "new hanover": "37129", "northampton": "37131",
+        "onslow": "37133", "orange": "37135", "pamlico": "37137",
+        "pasquotank": "37139", "pender": "37141", "perquimans": "37143",
+        "person": "37145", "pitt": "37147", "polk": "37149",
+        "randolph": "37151", "richmond": "37153", "robeson": "37155",
+        "rockingham": "37157", "rowan": "37159", "rutherford": "37161",
+        "sampson": "37163", "scotland": "37165", "stanly": "37167",
+        "stokes": "37169", "surry": "37171", "swain": "37173",
+        "transylvania": "37175", "tyrrell": "37177", "union": "37179",
+        "vance": "37181", "wake": "37183", "warren": "37185",
+        "washington": "37187", "watauga": "37189", "wayne": "37191",
+        "wilkes": "37193", "wilson": "37195", "yadkin": "37197",
+        "yancey": "37199",
+    }
+    return counties
+
+
+def filter_by_county(df: pd.DataFrame, county_name: str) -> pd.DataFrame:
+    """Filter dataset rows to those in the named NC county."""
+    lookup = _load_nc_county_fips()
+    key = county_name.strip().lower()
+    fips = lookup.get(key)
+
+    if fips is None:
+        # Fuzzy match: find counties containing the search string
+        matches = [name for name in lookup if key in name]
+        if len(matches) == 1:
+            fips = lookup[matches[0]]
+            print(f"  Matched '{county_name}' → {matches[0].title()} ({fips})")
+        elif matches:
+            print(f"  Ambiguous county name '{county_name}'. Did you mean one of:")
+            for m in sorted(matches):
+                print(f"    --county \"{m.title()}\"  (FIPS {lookup[m]})")
+            sys.exit(1)
+        else:
+            print(f"  County '{county_name}' not found in NC. Available counties:")
+            for name in sorted(lookup):
+                print(f"    {name.title()} ({lookup[name]})")
+            sys.exit(1)
+
+    return df[df["county_fips"] == fips].copy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Summary statistics
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -152,6 +276,8 @@ def main():
                        help="Bounding box filter")
     group.add_argument("--geojson", metavar="FILE",
                        help="GeoJSON polygon file")
+    group.add_argument("--county", metavar="NAME",
+                       help="NC county name (e.g. \"Mecklenburg\", \"Wake\")")
     parser.add_argument("--out", required=True,
                         help="Output CSV path (e.g. outputs/aoi/my_points.csv)")
     args = parser.parse_args()
@@ -163,6 +289,9 @@ def main():
         aoi_desc = (f"bbox lat=[{lat_min},{lat_max}] "
                     f"lon=[{lon_min},{lon_max}]")
         subset = filter_by_bbox(df, lat_min, lat_max, lon_min, lon_max)
+    elif args.county:
+        aoi_desc = f"county={args.county}"
+        subset = filter_by_county(df, args.county)
     else:
         aoi_desc = f"geojson={args.geojson}"
         subset = filter_by_geojson(df, args.geojson)

@@ -88,6 +88,7 @@ templates = Jinja2Templates(directory=str(TMPL_DIR))
 # ---------------------------------------------------------------------------
 _challenge_df: pd.DataFrame | None = None   # 4.67M NC addresses (lazy)
 _precomputed:  list[dict]  | None = None    # challenge50 + nc_test results
+_sample_cache: list[dict]  | None = None    # 20K stratified sample for map display
 
 # Async job store: job_id → {status, result?, error?, ...}
 _jobs: dict[str, dict] = {}
@@ -96,6 +97,7 @@ _jobs: dict[str, dict] = {}
 _analysis_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis")
 
 AOI_CONFIRMATION_THRESHOLD = 100   # Points above this require explicit confirm
+MAP_SAMPLE_SIZE = 20_000           # Points to show as gray dots on the map
 
 
 def _load_challenge_df() -> pd.DataFrame:
@@ -261,8 +263,9 @@ async def _run_analysis_job(job_id: str, lat: float, lon: float,
         api_result = _result_to_api(result, location_id)
         api_result["total_elapsed_s"] = round(time.time() - t0, 1)
         _jobs[job_id] = {"status": "done", "result": api_result}
-        global _precomputed
+        global _precomputed, _sample_cache
         _precomputed = None
+        _sample_cache = None
         logger.info(f"[job:{job_id}] done in {time.time()-t0:.1f}s")
     except Exception as exc:
         logger.error(f"[job:{job_id}] failed: {exc}")
@@ -301,8 +304,9 @@ async def _run_bbox_job(job_id: str, subset: pd.DataFrame):
         "errors":   errors,
         "n_points": n,
     })
-    global _precomputed
+    global _precomputed, _sample_cache
     _precomputed = None
+    _sample_cache = None
     logger.info(f"[bbox_job:{job_id}] done — {len(results_out)}/{n} ok, {len(errors)} errors")
 
 
@@ -346,9 +350,11 @@ def _result_to_api(result: dict, location_id: str, source: str = "on-demand") ->
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     precomputed = _load_precomputed()
+    df = _load_challenge_df()
     return templates.TemplateResponse("map.html", {
-        "request":     request,
+        "request":       request,
         "n_precomputed": len(precomputed),
+        "n_total":       len(df),
     })
 
 
@@ -378,6 +384,85 @@ async def get_precomputed():
             "png_url":        f"/outputs/reports/{r.get('location_id', '')}/{r.get('location_id', '')}.png",
         })
     return JSONResponse(content=out)
+
+
+@app.post("/api/reload")
+async def reload_precomputed():
+    """Force-reload all pre-computed results from disk (challenge50, nc_test, batch CSVs).
+
+    Use after a batch run completes externally, or after manually replacing a CSV,
+    to pick up new data without restarting the server.
+    """
+    global _precomputed, _sample_cache
+    _precomputed = None
+    _sample_cache = None
+    rows = _load_precomputed()
+    logger.info(f"[api/reload] Reloaded {len(rows)} pre-computed results from disk")
+    return JSONResponse(content={"status": "ok", "n_results": len(rows)})
+
+
+@app.get("/api/all_points")
+async def all_points():
+    """Return a stratified 20K sample of ALL dataset points for map display.
+
+    Each point includes: location_id, lat, lon, and whether it has been analyzed.
+    Pre-computed points include their risk_tier so the frontend can color them.
+    Unanalyzed points are shown as gray dots that can be clicked to compute.
+    """
+    global _sample_cache
+    if _sample_cache is None:
+        df = _load_challenge_df()
+        precomputed = _load_precomputed()
+
+        # Build set of analyzed location_ids
+        analyzed_ids = set()
+        analyzed_map = {}  # location_id → {risk_tier, risk_score, feasible, ...}
+        for r in precomputed:
+            lid = str(r.get("location_id", ""))
+            analyzed_ids.add(lid)
+            analyzed_map[lid] = r
+
+        # Stratified sample: take ~20K points spread across all counties
+        sample = df.sample(min(MAP_SAMPLE_SIZE, len(df)), random_state=42)
+
+        # Ensure ALL analyzed points are included (even if not in random sample)
+        analyzed_lids_in_sample = set(sample["location_id"].astype(str)) & analyzed_ids
+        missing_analyzed = analyzed_ids - analyzed_lids_in_sample
+        if missing_analyzed:
+            extras = df[df["location_id"].astype(str).isin(missing_analyzed)]
+            sample = pd.concat([sample, extras], ignore_index=True).drop_duplicates(
+                subset="location_id", keep="first"
+            )
+
+        rows = []
+        for _, r in sample.iterrows():
+            lid = str(r["location_id"])
+            if lid in analyzed_map:
+                am = analyzed_map[lid]
+                lat = am.get("lat") or am.get("latitude")
+                lon = am.get("lon") or am.get("longitude")
+                rows.append({
+                    "i": lid,
+                    "a": round(float(lat), 5),
+                    "o": round(float(lon), 5),
+                    "z": 1,  # analyzed
+                    "t": str(am.get("risk_tier", "low")),
+                    "f": bool(am.get("feasible", True)),
+                    "s": round(float(am.get("risk_score", 0)), 1),
+                })
+            else:
+                rows.append({
+                    "i": lid,
+                    "a": round(float(r["latitude"]), 5),
+                    "o": round(float(r["longitude"]), 5),
+                    "z": 0,  # not analyzed
+                })
+
+        _sample_cache = rows
+        logger.info(f"[api/all_points] Built sample: {len(rows)} pts "
+                    f"({sum(1 for r in rows if r['z'])} analyzed)")
+
+    return JSONResponse(content=_sample_cache)
 
 
 @app.post("/api/analyze")
