@@ -88,7 +88,7 @@ templates = Jinja2Templates(directory=str(TMPL_DIR))
 # ---------------------------------------------------------------------------
 _challenge_df: pd.DataFrame | None = None   # 4.67M NC addresses (lazy)
 _precomputed:  list[dict]  | None = None    # challenge50 + nc_test results
-_sample_cache: list[dict]  | None = None    # 20K stratified sample for map display
+_sample_cache: list[dict]  | None = None    # 20K stratified sample for map display (legacy)
 
 # Async job store: job_id → {status, result?, error?, ...}
 _jobs: dict[str, dict] = {}
@@ -98,6 +98,7 @@ _analysis_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="analysis"
 
 AOI_CONFIRMATION_THRESHOLD = 100   # Points above this require explicit confirm
 MAP_SAMPLE_SIZE = 20_000           # Points to show as gray dots on the map
+VIEWPORT_MAX_POINTS = 5_000        # Max unanalyzed dots per viewport request
 
 
 def _load_challenge_df() -> pd.DataFrame:
@@ -105,20 +106,34 @@ def _load_challenge_df() -> pd.DataFrame:
     if _challenge_df is None:
         csv = ROOT / "DATA_CHALLENGE_50.csv"
         logger.info(f"Loading {csv.name} …")
-        _challenge_df = pd.read_csv(csv, usecols=["location_id", "latitude", "longitude"],
-                                    dtype={"location_id": str})
+        _challenge_df = pd.read_csv(csv, usecols=["location_id", "latitude", "longitude", "geoid_cb"],
+                                    dtype={"location_id": str, "geoid_cb": str})
         logger.info(f"Loaded {len(_challenge_df):,} addresses")
     return _challenge_df
 
 
 def _load_precomputed() -> list[dict]:
+    """Load ALL analyzed points from every source into a unified, deduplicated list.
+
+    Priority (later source wins on duplicate location_id):
+      1. challenge50 CSV
+      2. nc_test JSONs
+      3. batch_results CSV
+      4. on-demand reports/ JSONs  (highest priority — most recent)
+    """
     global _precomputed
     if _precomputed is not None:
         return _precomputed
 
-    rows: list[dict] = []
+    by_id: dict[str, dict] = {}  # location_id → row (later insert wins)
 
-    # Challenge-50 results
+    def _norm(row: dict, source: str) -> dict:
+        row["_source"] = source
+        lid = str(row.get("location_id", ""))
+        row["location_id"] = lid
+        return row
+
+    # 1. Challenge-50 results
     c50_csv = OUT_DIR / "challenge50" / "challenge50_results.csv"
     if c50_csv.exists():
         df = pd.read_csv(c50_csv)
@@ -130,36 +145,30 @@ def _load_precomputed() -> list[dict]:
                               .map({"true": True, "false": False, "1": True, "0": False})
                               .fillna(True))
         for r in df.to_dict("records"):
-            r["_source"] = "challenge50"
-            rows.append(r)
+            r = _norm(r, "challenge50")
+            by_id[r["location_id"]] = r
 
-    # NC test set (per-point JSONs)
+    # 2. NC test set (per-point JSONs)
     nc_dir = OUT_DIR / "nc_test"
     for jf in sorted(nc_dir.glob("point_*.json")):
         try:
             d = json.loads(jf.read_text())
             rk = d.get("risk", {})
             cl = d.get("classification", {})
-            rows.append({
-                "location_id":    jf.stem.replace("point_", ""),
-                "lat":            d.get("lat"),
-                "lon":            d.get("lon"),
-                "latitude":       d.get("lat"),
-                "longitude":      d.get("lon"),
-                "feasible":       d.get("feasible", True),
-                "risk_score":     rk.get("risk_score", 0),
-                "risk_tier":      rk.get("risk_tier", "low"),
-                "dominant":       cl.get("dominant", "clear"),
-                "slope_deg":      d.get("slope_deg", 0),
-                "canopy_max_m":   d.get("canopy_max_m", 0),
-                "building_count": d.get("building_count", 0),
-                "warnings":       "; ".join(d.get("warnings", [])),
-                "_source":        "nc_test",
-            })
+            lid = jf.stem.replace("point_", "")
+            by_id[lid] = _norm({
+                "location_id": lid, "lat": d.get("lat"), "lon": d.get("lon"),
+                "latitude": d.get("lat"), "longitude": d.get("lon"),
+                "feasible": d.get("feasible", True),
+                "risk_score": rk.get("risk_score", 0), "risk_tier": rk.get("risk_tier", "low"),
+                "dominant": cl.get("dominant", "clear"), "slope_deg": d.get("slope_deg", 0),
+                "canopy_max_m": d.get("canopy_max_m", 0), "building_count": d.get("building_count", 0),
+                "warnings": "; ".join(d.get("warnings", [])),
+            }, "nc_test")
         except Exception:
             pass
 
-    # Full batch results (if available)
+    # 3. Full batch results
     batch_csv = OUT_DIR / "batch" / "batch_results.csv"
     if batch_csv.exists():
         bdf = pd.read_csv(batch_csv)
@@ -172,11 +181,33 @@ def _load_precomputed() -> list[dict]:
             bdf["feasible"] = (bdf["feasible"].astype(str).str.lower()
                                .map({"true": True, "false": False}).fillna(True))
         for r in bdf.to_dict("records"):
-            r["_source"] = "batch"
-            rows.append(r)
+            r = _norm(r, "batch")
+            by_id[r["location_id"]] = r
 
-    _precomputed = rows
-    logger.info(f"Loaded {len(rows)} pre-computed results")
+    # 4. On-demand reports (highest priority — freshest data with PNGs)
+    reports_dir = OUT_DIR / "reports"
+    if reports_dir.exists():
+        for jf in sorted(reports_dir.glob("*/*.json")):
+            try:
+                d = json.loads(jf.read_text())
+                lid = jf.parent.name
+                rk = d.get("risk", {})
+                cl = d.get("classification", {})
+                by_id[lid] = _norm({
+                    "location_id": lid, "lat": d.get("lat"), "lon": d.get("lon"),
+                    "latitude": d.get("lat"), "longitude": d.get("lon"),
+                    "feasible": d.get("feasible", True),
+                    "risk_score": rk.get("risk_score", 0), "risk_tier": rk.get("risk_tier", "low"),
+                    "dominant": cl.get("dominant", "clear"), "slope_deg": d.get("slope_deg", 0),
+                    "canopy_max_m": d.get("canopy_max_m", 0), "building_count": d.get("building_count", 0),
+                    "failure_mode": d.get("failure_mode", ""),
+                    "warnings": "; ".join(d.get("warnings", [])),
+                }, "on_demand")
+            except Exception:
+                pass
+
+    _precomputed = list(by_id.values())
+    logger.info(f"Loaded {len(_precomputed)} unique pre-computed results")
     return _precomputed
 
 
@@ -219,6 +250,45 @@ def _nearest_challenge_point(lat: float, lon: float) -> dict | None:
     }
 
 
+PANEL_NAMES = ["terrain", "canopy_buildings", "constraints", "horizon", "neighborhood"]
+PANEL_TITLES = ["Terrain (far-field)", "Canopy + Buildings", "Constraints", "Horizon Profile", "Neighbourhood"]
+
+
+def _get_panel_urls(lid: str) -> list[dict] | None:
+    """Return list of individual panel image URLs if they exist."""
+    report_dir = OUT_DIR / "reports" / lid
+    if not report_dir.exists():
+        return None
+    panels = []
+    for name, title in zip(PANEL_NAMES, PANEL_TITLES):
+        p = report_dir / f"panel_{name}.png"
+        if p.exists():
+            panels.append({"name": name, "title": title, "url": f"/outputs/reports/{lid}/panel_{name}.png"})
+    return panels if panels else None
+
+
+def _split_combined_png(lid: str):
+    """Split a combined 5-panel PNG into individual panels (if not already done)."""
+    report_dir = OUT_DIR / "reports" / lid
+    combined = report_dir / f"{lid}.png"
+    if not combined.exists():
+        return
+    if (report_dir / f"panel_{PANEL_NAMES[0]}.png").exists():
+        return  # already split
+    try:
+        from PIL import Image
+        img = Image.open(combined)
+        w, h = img.size
+        pw = w // 5
+        for i, name in enumerate(PANEL_NAMES):
+            x0 = i * pw
+            x1 = (i + 1) * pw if i < 4 else w
+            panel = img.crop((x0, 0, x1, h))
+            panel.save(report_dir / f"panel_{name}.png", optimize=True)
+    except Exception as exc:
+        logger.warning(f"Panel split failed for {lid}: {exc}")
+
+
 def _png_b64(result: dict, location_id: str) -> str:
     """Generate a 5-panel PNG for result and return as base64 string."""
     import matplotlib
@@ -239,11 +309,12 @@ def _png_b64(result: dict, location_id: str) -> str:
 
 
 def _save_analysis_result(result: dict, location_id: str):
-    """Persist JSON + PNG for a completed analysis result (sync, safe to run in executor)."""
+    """Persist JSON + PNG + split panels for a completed analysis result."""
     json_path = OUT_DIR / "reports" / location_id / f"{location_id}.json"
     json_path.parent.mkdir(parents=True, exist_ok=True)
     _main_mod._save_json(result, json_path)
     _png_b64(result, location_id)
+    _split_combined_png(location_id)
 
 
 async def _run_analysis_job(job_id: str, lat: float, lon: float,
@@ -340,6 +411,7 @@ def _result_to_api(result: dict, location_id: str, source: str = "on-demand") ->
         } if bn else None,
         "_source":        source,
         "png_url":        f"/outputs/reports/{location_id}/{location_id}.png",
+        "panels":         _get_panel_urls(location_id),
     }
 
 
@@ -363,13 +435,18 @@ async def get_precomputed():
     rows = _load_precomputed()
     # Ensure lat/lon present from either column naming convention
     out = []
+    seen = set()
     for r in rows:
         lat = r.get("lat") or r.get("latitude")
         lon = r.get("lon") or r.get("longitude")
         if lat is None or lon is None:
             continue
+        lid = str(r.get("location_id", ""))
+        if lid in seen:
+            continue
+        seen.add(lid)
         out.append({
-            "location_id":    str(r.get("location_id", "")),
+            "location_id":    lid,
             "lat":            float(lat),
             "lon":            float(lon),
             "feasible":       bool(r.get("feasible", True)),
@@ -381,7 +458,8 @@ async def get_precomputed():
             "building_count": int(r.get("building_count", 0)),
             "warnings":       str(r.get("warnings", "") or ""),
             "_source":        str(r.get("_source", "")),
-            "png_url":        f"/outputs/reports/{r.get('location_id', '')}/{r.get('location_id', '')}.png",
+            "png_url":        f"/outputs/reports/{lid}/{lid}.png" if (OUT_DIR / "reports" / lid / f"{lid}.png").exists() else None,
+            "panels":         _get_panel_urls(lid),
         })
     return JSONResponse(content=out)
 
@@ -564,6 +642,218 @@ async def analyze_bbox(req: BboxRequest):
         status_code=202,
         content={"job_id": job_id, "status": "running", "n_points": n},
     )
+
+
+# ---------------------------------------------------------------------------
+# Viewport-based point loading (progressive zoom)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/points_in_view")
+async def points_in_view(lat_min: float, lat_max: float, lon_min: float, lon_max: float):
+    """Return points within the visible map viewport.
+
+    Returns analyzed points (colored) + a capped sample of unanalyzed points (white).
+    Used at high zoom levels instead of loading all 4.67M at once.
+    """
+    df = _load_challenge_df()
+    precomputed = _load_precomputed()
+
+    # Build analyzed lookup
+    analyzed_map = {}
+    for r in precomputed:
+        lid = str(r.get("location_id", ""))
+        analyzed_map[lid] = r
+
+    # Spatial filter on the full dataset
+    mask = (
+        (df["latitude"] >= lat_min) & (df["latitude"] <= lat_max) &
+        (df["longitude"] >= lon_min) & (df["longitude"] <= lon_max)
+    )
+    visible = df[mask]
+
+    rows = []
+    n_analyzed = 0
+
+    # First pass: all analyzed points in view (always include all of them)
+    visible_lids = set(visible["location_id"].astype(str))
+    for lid, am in analyzed_map.items():
+        lat = am.get("lat") or am.get("latitude")
+        lon = am.get("lon") or am.get("longitude")
+        if lat is None or lon is None:
+            continue
+        lat, lon = float(lat), float(lon)
+        if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+            n_analyzed += 1
+            rows.append({
+                "i": lid,
+                "a": round(lat, 5),
+                "o": round(lon, 5),
+                "z": 1,
+                "t": str(am.get("risk_tier", "low")),
+                "f": bool(am.get("feasible", True)),
+                "s": round(float(am.get("risk_score", 0)), 1),
+            })
+
+    # Second pass: unanalyzed points (sample if too many)
+    analyzed_ids = set(analyzed_map.keys())
+    unanalyzed = visible[~visible["location_id"].astype(str).isin(analyzed_ids)]
+    if len(unanalyzed) > VIEWPORT_MAX_POINTS:
+        unanalyzed = unanalyzed.sample(VIEWPORT_MAX_POINTS, random_state=42)
+    for _, r in unanalyzed.iterrows():
+        rows.append({
+            "i": str(r["location_id"]),
+            "a": round(float(r["latitude"]), 5),
+            "o": round(float(r["longitude"]), 5),
+            "z": 0,
+        })
+
+    return JSONResponse(content={
+        "points": rows,
+        "n_total_in_view": int(mask.sum()),
+        "n_analyzed": n_analyzed,
+        "n_unanalyzed_shown": len(unanalyzed),
+        "truncated": len(visible) - n_analyzed > VIEWPORT_MAX_POINTS,
+    })
+
+
+@app.get("/api/analyzed_points")
+async def analyzed_points_endpoint():
+    """Return ALL analyzed points (lightweight) — used at all zoom levels."""
+    precomputed = _load_precomputed()
+    rows = []
+    for r in precomputed:
+        lat = r.get("lat") or r.get("latitude")
+        lon = r.get("lon") or r.get("longitude")
+        if lat is None or lon is None:
+            continue
+        rows.append({
+            "i": str(r.get("location_id", "")),
+            "a": round(float(lat), 5),
+            "o": round(float(lon), 5),
+            "t": str(r.get("risk_tier", "low")),
+            "f": bool(r.get("feasible", True)),
+            "s": round(float(r.get("risk_score", 0)), 1),
+        })
+    return JSONResponse(content=rows)
+
+
+# ---------------------------------------------------------------------------
+# Block-group-level GeoJSON for mid-zoom choropleth
+# ---------------------------------------------------------------------------
+
+_bg_geojson_cache: dict | None = None
+
+@app.get("/api/blockgroup_geojson")
+async def blockgroup_geojson():
+    """Return NC Census Block Group boundaries with pass-rate data for choropleth."""
+    global _bg_geojson_cache
+    if _bg_geojson_cache is not None:
+        return JSONResponse(content=_bg_geojson_cache)
+
+    bd = ROOT / "data" / "boundaries"
+    bd.mkdir(parents=True, exist_ok=True)
+    fp = bd / "nc_block_groups.geojson"
+    if not fp.exists():
+        # Auto-download and convert from TIGER/Line
+        logger.info("[blockgroup_geojson] Downloading NC block group boundaries…")
+        try:
+            import urllib.request, zipfile, tempfile
+            url = "https://www2.census.gov/geo/tiger/TIGER2023/BG/tl_2023_37_bg.zip"
+            zip_path = bd / "tl_2023_37_bg.zip"
+            urllib.request.urlretrieve(url, zip_path)
+            import geopandas as gpd
+            gdf = gpd.read_file(f"zip://{zip_path}")
+            gdf["geometry"] = gdf["geometry"].simplify(0.0005, preserve_topology=True)
+            if gdf.crs and gdf.crs.to_epsg() != 4326:
+                gdf = gdf.to_crs(epsg=4326)
+            gdf.to_file(fp, driver="GeoJSON")
+            logger.info(f"[blockgroup_geojson] Saved {len(gdf)} block groups to {fp}")
+        except Exception as exc:
+            logger.error(f"[blockgroup_geojson] Download failed: {exc}")
+            return JSONResponse(content={"type": "FeatureCollection", "features": []})
+
+    full = json.loads(fp.read_text())
+
+    # Load block group summary
+    bg_csv = OUT_DIR / "zonal" / "block_group_summary.csv"
+    summary: dict[str, dict] = {}
+    if bg_csv.exists():
+        bdf = pd.read_csv(bg_csv, dtype={"geoid_bg": str})
+        for _, row in bdf.iterrows():
+            gid = str(row["geoid_bg"])
+            summary[gid] = {
+                "mean_risk":     round(float(row.get("mean_risk", 0)), 1),
+                "pct_feasible":  round(float(row.get("pct_feasible", 0)), 1),
+                "pct_critical":  round(float(row.get("pct_critical", 0)), 1),
+                "n_points":      int(row.get("n_points", 0)),
+                "dominant_mode": str(row.get("dominant_mode", "—")),
+            }
+
+    # Attach stats to features
+    for feat in full.get("features", []):
+        gid = feat.get("properties", {}).get("GEOID", "")
+        if gid in summary:
+            feat["properties"].update(summary[gid])
+            feat["properties"]["has_data"] = True
+        else:
+            feat["properties"]["has_data"] = False
+            feat["properties"]["mean_risk"] = None
+
+    _bg_geojson_cache = full
+    n_with = sum(1 for f in full["features"] if f.get("properties", {}).get("has_data"))
+    logger.info(f"[blockgroup_geojson] Served {len(full['features'])} block groups ({n_with} with data)")
+    return JSONResponse(content=full)
+
+
+_county_geojson_cache: dict | None = None
+
+
+@app.get("/api/county_geojson")
+async def county_geojson():
+    """Return NC county boundaries as GeoJSON with risk summary data for choropleth overlay."""
+    global _county_geojson_cache
+    if _county_geojson_cache is not None:
+        return JSONResponse(content=_county_geojson_cache)
+
+    import urllib.request
+    bd = ROOT / "data" / "boundaries"
+    bd.mkdir(parents=True, exist_ok=True)
+    fp = bd / "us_counties_fips.geojson"
+    if not fp.exists():
+        url = "https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json"
+        with urllib.request.urlopen(url, timeout=60) as r:
+            fp.write_bytes(r.read())
+
+    full = json.loads(fp.read_text())
+    nc_features = [f for f in full["features"] if str(f.get("id", "")).startswith("37")]
+
+    # Load county summary from zonal output
+    county_csv = OUT_DIR / "zonal" / "county_summary.csv"
+    summary = {}
+    if county_csv.exists():
+        cdf = pd.read_csv(county_csv, dtype={"county_fips": str})
+        for _, row in cdf.iterrows():
+            fips = str(row["county_fips"]).zfill(5)
+            summary[fips] = {
+                "mean_risk": round(float(row.get("mean_risk", 0)), 1),
+                "pct_feasible": round(float(row.get("pct_feasible", 0)), 1),
+                "pct_critical": round(float(row.get("pct_critical", 0)), 1),
+                "n_points": int(row.get("n_points", 0)),
+                "dominant_mode": str(row.get("dominant_mode", "—")),
+            }
+
+    # Attach summary data to each feature's properties
+    for feat in nc_features:
+        fips = str(feat.get("id", ""))
+        if fips in summary:
+            feat["properties"].update(summary[fips])
+        else:
+            feat["properties"]["mean_risk"] = None
+
+    result = {"type": "FeatureCollection", "features": nc_features}
+    _county_geojson_cache = result
+    logger.info(f"[api/county_geojson] Served {len(nc_features)} counties")
+    return JSONResponse(content=result)
 
 
 @app.get("/outputs/{path:path}")

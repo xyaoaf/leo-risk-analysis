@@ -1,6 +1,10 @@
 """
 fetch_terrain: fetch USGS 3DEP DEM for a given point + radius.
 Returns a 2D numpy array of elevation (meters) with metadata.
+
+Includes a tile cache for the far-field terrain (1500m radius, 10m/px).
+When multiple points are within the same ~1km grid cell, the cached tile
+is cropped instead of re-fetched, saving 5-8s per point in AOI batches.
 """
 
 import time
@@ -9,6 +13,71 @@ import numpy as np
 from pyproj import Transformer
 
 logger = logging.getLogger(__name__)
+
+# ── Tile cache for far-field terrain ────────────────────────────────────────
+# Key: (grid_lat, grid_lon, resolution_hint) → full fetched result dict
+# Grid snaps to ~1km cells so nearby points hit the same cache entry.
+# The cached tile is larger than needed; we crop it for each caller.
+_TERRAIN_CACHE: dict[tuple, dict] = {}
+_CACHE_GRID_DEG = 0.009  # ~1km at NC latitudes (0.009° ≈ 1000m)
+_CACHE_MAX_ENTRIES = 200  # LRU-ish: evict oldest when full
+
+
+def _cache_key(lat: float, lon: float, radius_m: float, resolution_hint: int) -> tuple:
+    """Round lat/lon to a grid cell for cache lookup."""
+    return (
+        round(lat / _CACHE_GRID_DEG) * _CACHE_GRID_DEG,
+        round(lon / _CACHE_GRID_DEG) * _CACHE_GRID_DEG,
+        int(radius_m),
+        int(resolution_hint),
+    )
+
+
+def _crop_terrain_to_bbox(cached: dict, target_bbox: tuple) -> dict:
+    """Crop a cached terrain array to a smaller target bounding box.
+
+    If the target bbox is fully within the cached bbox, returns a cropped copy.
+    Otherwise returns None (cache miss — need fresh fetch).
+    """
+    c_w, c_s, c_e, c_n = cached["bbox"]
+    t_w, t_s, t_e, t_n = target_bbox
+
+    # Check containment (with small tolerance)
+    tol = 1e-5
+    if t_w < c_w - tol or t_s < c_s - tol or t_e > c_e + tol or t_n > c_n + tol:
+        return None  # target not fully within cached tile
+
+    arr = cached["array"]
+    nrows, ncols = arr.shape
+
+    # Convert target bbox to pixel coordinates
+    row_top = int((c_n - t_n) / (c_n - c_s) * nrows)
+    row_bot = int((c_n - t_s) / (c_n - c_s) * nrows)
+    col_left = int((t_w - c_w) / (c_e - c_w) * ncols)
+    col_right = int((t_e - c_w) / (c_e - c_w) * ncols)
+
+    # Clamp
+    row_top = max(0, min(row_top, nrows - 1))
+    row_bot = max(row_top + 1, min(row_bot, nrows))
+    col_left = max(0, min(col_left, ncols - 1))
+    col_right = max(col_left + 1, min(col_right, ncols))
+
+    cropped = arr[row_top:row_bot, col_left:col_right].copy()
+    return {
+        "array": cropped,
+        "resolution": cached["resolution"],
+        "bbox": target_bbox,
+        "crs": cached["crs"],
+        "source": cached["source"] + " [cached]",
+        "elapsed_s": 0.0,
+        "nodata": cached["nodata"],
+    }
+
+
+def clear_terrain_cache():
+    """Clear the terrain tile cache (e.g., between batch runs)."""
+    _TERRAIN_CACHE.clear()
+    logger.info("[terrain] Cache cleared")
 
 
 def _bbox_from_point(lat: float, lon: float, radius_m: float) -> tuple[float, float, float, float]:
@@ -49,6 +118,19 @@ def fetch_terrain(lat: float, lon: float, radius_m: float = 500, resolution_hint
     _LADDER = (1, 3, 10, 30)
     t0 = time.time()
     bbox = _bbox_from_point(lat, lon, radius_m)
+
+    # ── Cache check (far-field terrain benefits most from caching) ──────────
+    if radius_m >= 500:
+        key = _cache_key(lat, lon, radius_m, resolution_hint)
+        if key in _TERRAIN_CACHE:
+            cropped = _crop_terrain_to_bbox(_TERRAIN_CACHE[key], bbox)
+            if cropped is not None:
+                logger.info(
+                    f"[terrain] CACHE HIT | center=({lat},{lon}) "
+                    f"radius={radius_m}m shape={cropped['array'].shape}"
+                )
+                return cropped
+
     logger.info(
         f"[terrain] Fetching 3DEP DEM | center=({lat},{lon}) "
         f"radius={radius_m}m hint={resolution_hint}m"
@@ -84,7 +166,7 @@ def fetch_terrain(lat: float, lon: float, radius_m: float = 500, resolution_hint
                     f"shape={arr.shape} min={np.nanmin(arr):.1f}m max={np.nanmax(arr):.1f}m "
                     f"elapsed={elapsed:.2f}s"
                 )
-                return {
+                result = {
                     "array": arr,
                     "resolution": actual_res,
                     "bbox": bbox,
@@ -93,6 +175,15 @@ def fetch_terrain(lat: float, lon: float, radius_m: float = 500, resolution_hint
                     "elapsed_s": elapsed,
                     "nodata": nodata,
                 }
+                # Store in cache for nearby points
+                if radius_m >= 500:
+                    key = _cache_key(lat, lon, radius_m, resolution_hint)
+                    if len(_TERRAIN_CACHE) >= _CACHE_MAX_ENTRIES:
+                        # Evict oldest entry
+                        oldest = next(iter(_TERRAIN_CACHE))
+                        del _TERRAIN_CACHE[oldest]
+                    _TERRAIN_CACHE[key] = result
+                return result
             except Exception as e:
                 sleep_s = _BACKOFF_BASE * (2 ** (attempt - 1))  # 5, 10, 20, 40s
                 logger.warning(

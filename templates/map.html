@@ -17,7 +17,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: 'Segoe UI', sans-serif; background: #111827; color: #f9fafb; height: 100vh; display: flex; flex-direction: column; }
 
-    /* ── Top bar ── */
+    /* -- Top bar -- */
     #topbar {
       display: flex; align-items: center; gap: 12px;
       padding: 8px 16px; background: #1f2937; border-bottom: 1px solid #374151;
@@ -29,141 +29,212 @@
     #topbar .stat b { color: #d1d5db; }
     #status-bar { margin-left: auto; font-size: 11px; color: #6b7280; }
 
-    /* ── Main layout ── */
-    #main { flex: 1; display: flex; overflow: hidden; }
-    #map  { flex: 1; }
+    /* -- Main layout -- */
+    #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #map-wrap { flex: 1; min-height: 0; position: relative; }
+    #map { width: 100%; height: 100%; }
 
-    /* ── Sidebar ── */
-    #sidebar {
-      width: 360px; background: #1f2937; border-left: 1px solid #374151;
-      display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+    /* -- Bottom panel (drawer) -- */
+    #bottom-panel {
+      flex-shrink: 0; background: #1f2937; border-top: 2px solid #374151;
+      transition: height 0.3s ease; overflow: hidden; position: relative;
     }
-    #sidebar-header {
-      padding: 10px 14px; background: #111827; border-bottom: 1px solid #374151;
+    #bottom-panel.collapsed { height: 36px !important; }
+    #bottom-panel.expanded  { height: 280px; }
+    #bottom-panel.tall      { height: 320px; }
+
+    #panel-toggle {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 14px; cursor: pointer; user-select: none;
+      background: #111827; border-bottom: 1px solid #374151;
       font-size: 12px; font-weight: 600; color: #d1d5db;
     }
-    #sidebar-content { flex: 1; overflow-y: auto; padding: 12px; }
-    #sidebar-content p { font-size: 11px; color: #6b7280; line-height: 1.5; }
+    #panel-toggle:hover { background: #1a2332; }
+    #panel-toggle .chevron { font-size: 10px; color: #6b7280; transition: transform 0.3s; }
+    #bottom-panel.collapsed #panel-toggle .chevron { transform: rotate(180deg); }
 
-    /* ── Result card ── */
-    .result-card { background: #111827; border-radius: 6px; border: 1px solid #374151; margin-bottom: 10px; overflow: hidden; }
-    .result-card .card-header {
-      display: flex; align-items: center; gap: 8px;
-      padding: 8px 12px; font-size: 12px; font-weight: 600;
+    #panel-body {
+      display: flex; gap: 14px; padding: 10px 14px;
+      height: calc(100% - 36px); overflow: hidden;
     }
-    .result-card .card-body { padding: 10px 12px; }
-    .result-card .card-body table { width: 100%; font-size: 11px; border-collapse: collapse; }
-    .result-card .card-body td { padding: 2px 0; color: #9ca3af; }
-    .result-card .card-body td:last-child { text-align: right; color: #f3f4f6; font-weight: 500; }
-    .result-card .card-img { width: 100%; border-top: 1px solid #374151; }
-    .result-card .card-img img { width: 100%; display: block; }
 
-    /* ── Tier badges ── */
+    /* -- Summary card (left) -- */
+    #panel-summary { flex: 0 0 280px; overflow-y: auto; font-size: 11px; }
+    #panel-summary .result-card { background: #111827; border-radius: 6px; border: 1px solid #374151; overflow: hidden; }
+    #panel-summary .card-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12px; font-weight: 600; }
+    #panel-summary .card-body { padding: 8px 12px; }
+    #panel-summary .card-body table { width: 100%; font-size: 11px; border-collapse: collapse; }
+    #panel-summary .card-body td { padding: 2px 0; color: #9ca3af; }
+    #panel-summary .card-body td:last-child { text-align: right; color: #f3f4f6; font-weight: 500; }
+
+    /* -- Figures area (right) -- */
+    #panel-figures {
+      flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden;
+      display: flex; align-items: stretch; gap: 6px; padding: 4px 0;
+    }
+    .panel-card {
+      flex: 0 0 auto; display: flex; flex-direction: column; align-items: center;
+      cursor: pointer; border-radius: 6px; border: 1px solid #374151;
+      background: #111827; overflow: hidden; transition: border-color 0.15s;
+    }
+    .panel-card:hover { border-color: #60a5fa; }
+    .panel-card img {
+      height: calc(100% - 22px); max-height: 210px; object-fit: contain;
+      display: block;
+    }
+    .panel-card .panel-label {
+      font-size: 9px; color: #9ca3af; padding: 3px 6px;
+      white-space: nowrap; text-align: center; width: 100%;
+      background: #1f2937; border-top: 1px solid #374151;
+    }
+    #panel-figures .no-img { color: #4b5563; font-size: 12px; font-style: italic; display: flex; align-items: center; justify-content: center; width: 100%; }
+    /* Fallback: single combined image */
+    #panel-figures > img {
+      height: 100%; max-height: 230px; object-fit: contain;
+      cursor: pointer; border-radius: 4px; border: 1px solid #374151;
+    }
+    #panel-figures > img:hover { opacity: 0.85; }
+
+    /* -- Batch results list -- */
+    #panel-batch-list { flex: 1; min-width: 0; overflow-y: auto; overflow-x: hidden; display: none; }
+    #panel-batch-list .batch-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 10px; font-size: 11px; cursor: pointer;
+      border-bottom: 1px solid #1f2937; border-radius: 4px;
+    }
+    #panel-batch-list .batch-row:hover { background: #374151; }
+    .batch-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+    /* -- Tier badges -- */
     .tier-low      { background: #065f46; color: #6ee7b7; }
     .tier-moderate { background: #78350f; color: #fcd34d; }
     .tier-high     { background: #7c2d12; color: #fb923c; }
     .tier-critical { background: #7f1d1d; color: #fca5a5; }
 
-    /* ── Spinner ── */
-    #spinner {
-      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
-      z-index: 9999; justify-content: center; align-items: center; flex-direction: column; gap: 14px;
+    /* -- Legend (TOP RIGHT, compact) -- */
+    #legend {
+      position: absolute; top: 10px; right: 10px; z-index: 800;
+      background: rgba(17,24,39,0.92); border: 1px solid #374151;
+      border-radius: 8px; padding: 8px 12px; font-size: 10px;
+      pointer-events: auto; max-width: 170px;
     }
-    #spinner.active { display: flex; }
-    .spin-ring {
-      width: 48px; height: 48px; border: 4px solid #374151;
-      border-top-color: #60a5fa; border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    #spinner p { color: #d1d5db; font-size: 13px; }
+    #legend h4 { font-size: 10px; font-weight: 700; color: #d1d5db; margin-bottom: 4px; }
+    .leg-row { display: flex; align-items: center; gap: 5px; margin: 2px 0; }
+    .leg-dot { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.4); flex-shrink: 0; }
+    .leg-dot-sm { width: 6px; height: 6px; }
+    #legend-mode { margin-top: 4px; font-size: 9px; color: #6b7280; }
+    #legend hr { border: none; border-top: 1px solid #374151; margin: 4px 0; }
+    .leg-section { font-size: 9px; font-weight: 600; color: #9ca3af; margin-top: 3px; margin-bottom: 1px; }
 
-    /* ── Confirm dialog ── */
-    #confirm-dialog {
-      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-      z-index: 9998; justify-content: center; align-items: center;
+    /* -- Instructions (BOTTOM LEFT) -- */
+    #instructions {
+      position: absolute; bottom: 10px; left: 10px; z-index: 800;
+      background: rgba(17,24,39,0.88); border: 1px solid #374151;
+      border-radius: 8px; padding: 8px 12px; font-size: 10px;
+      color: #9ca3af; line-height: 1.5;
+      pointer-events: auto;
     }
+    #instructions b { color: #d1d5db; }
+
+    /* -- Make draw toolbar more visible -- */
+    .leaflet-draw-toolbar a { width: 32px !important; height: 32px !important; line-height: 32px !important; }
+    .leaflet-draw-section { background: rgba(31,41,55,0.95) !important; border-radius: 6px !important; }
+    .leaflet-draw-toolbar { border: 2px solid #60a5fa !important; border-radius: 6px !important; }
+
+    /* -- Lightbox -- */
+    #lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.88); z-index: 10000; justify-content: center; align-items: center; cursor: zoom-out; }
+    #lightbox.active { display: flex; }
+    #lightbox img { max-width: 95vw; max-height: 92vh; object-fit: contain; border-radius: 6px; box-shadow: 0 4px 40px rgba(0,0,0,0.7); }
+    #lightbox .close-btn { position: absolute; top: 16px; right: 24px; font-size: 28px; color: #9ca3af; cursor: pointer; background: none; border: none; font-weight: 300; }
+    #lightbox .close-btn:hover { color: white; }
+
+    /* -- Spinner -- */
+    #spinner { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center; flex-direction: column; gap: 14px; }
+    #spinner.active { display: flex; }
+    .spin-ring { width: 48px; height: 48px; border: 4px solid #374151; border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #spinner p { color: #d1d5db; font-size: 13px; max-width: 90vw; text-align: center; word-break: break-all; }
+
+    /* -- Confirm dialog -- */
+    #confirm-dialog { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 9998; justify-content: center; align-items: center; }
     #confirm-dialog.active { display: flex; }
-    #confirm-box {
-      background: #1f2937; border: 1px solid #374151; border-radius: 10px;
-      padding: 24px 28px; max-width: 400px; text-align: center;
-    }
+    #confirm-box { background: #1f2937; border: 1px solid #374151; border-radius: 10px; padding: 24px 28px; max-width: 400px; text-align: center; }
     #confirm-box h2 { font-size: 15px; margin-bottom: 10px; color: #f9fafb; }
     #confirm-box p  { font-size: 12px; color: #9ca3af; margin-bottom: 18px; line-height: 1.6; }
     .btn { padding: 7px 18px; border-radius: 5px; border: none; cursor: pointer; font-size: 12px; font-weight: 600; }
     .btn-primary { background: #3b82f6; color: white; }
     .btn-secondary { background: #374151; color: #d1d5db; margin-left: 10px; }
-
-    /* ── Legend ── */
-    #legend {
-      position: absolute; bottom: 28px; left: 10px; z-index: 800;
-      background: rgba(17,24,39,0.92); border: 1px solid #374151;
-      border-radius: 8px; padding: 10px 14px; font-size: 11px;
-    }
-    #legend h4 { font-size: 11px; font-weight: 700; color: #d1d5db; margin-bottom: 6px; }
-    .leg-row { display: flex; align-items: center; gap: 7px; margin: 3px 0; }
-    .leg-dot { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.4); flex-shrink: 0; }
-
-    /* ── Instruction box ── */
-    #instructions {
-      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
-      z-index: 800; background: rgba(17,24,39,0.90); border: 1px solid #374151;
-      border-radius: 8px; padding: 8px 18px; font-size: 11px; color: #9ca3af;
-      white-space: nowrap;
-    }
   </style>
 </head>
 <body>
 
-<!-- ── Top bar ────────────────────────────────────────────────────────── -->
+<!-- Top bar -->
 <div id="topbar">
   <h1>LEO Satellite Risk Analysis</h1>
   <span class="sep">|</span>
   <span class="stat"><b>{{ "{:,}".format(n_total) }}</b> NC addresses</span>
   <span class="sep">|</span>
   <span class="stat"><b id="n-analyzed">{{ n_precomputed }}</b> analyzed</span>
-  <div id="status-bar">Loading…</div>
+  <div id="status-bar">Loading...</div>
 </div>
 
-<!-- ── Main ──────────────────────────────────────────────────────────── -->
+<!-- Main -->
 <div id="main">
-  <div id="map"></div>
+  <div id="map-wrap">
+    <div id="map"></div>
 
-  <div id="sidebar">
-    <div id="sidebar-header">Analysis Results</div>
-    <div id="sidebar-content">
-      <p>
-        <b style="color:#60a5fa">Gray dots</b> = unanalyzed addresses from the 4.67M NC dataset.<br><br>
-        <b style="color:#2ecc71">Colored dots</b> = pre-computed risk results (594 points).<br><br>
-        <b>Click any dot</b> to run on-demand risk analysis (~30s).<br><br>
-        <b>Draw a rectangle</b> on the map to batch-analyze all points in the area.
-      </p>
+    <!-- Legend (TOP RIGHT, compact) -->
+    <div id="legend">
+      <h4>Risk Tier</h4>
+      <div class="leg-row"><div class="leg-dot" style="background:#2ecc71"></div> Low (0-19)</div>
+      <div class="leg-row"><div class="leg-dot" style="background:#f39c12"></div> Moderate (20-44)</div>
+      <div class="leg-row"><div class="leg-dot" style="background:#e67e22"></div> High (45-69)</div>
+      <div class="leg-row"><div class="leg-dot" style="background:#e74c3c"></div> Critical (70-100)</div>
+      <hr>
+      <div class="leg-row"><div class="leg-dot leg-dot-sm" style="background:#fff;border:1.5px solid #6b7280"></div> Unanalyzed</div>
+      <div class="leg-row"><div class="leg-dot" style="background:#2ecc71;border-radius:2px;width:14px;height:9px"></div> High pass rate</div>
+      <div class="leg-row"><div class="leg-dot" style="background:#e74c3c;border-radius:2px;width:14px;height:9px"></div> Low pass rate</div>
+      <div id="legend-mode">County choropleth</div>
+    </div>
+
+    <!-- Instructions (BOTTOM LEFT) -->
+    <div id="instructions">
+      <b>Click</b> point to analyze |
+      <b>Draw rectangle</b> for batch |
+      Zoom for detail
+    </div>
+  </div>
+
+  <!-- Bottom panel -->
+  <div id="bottom-panel" class="collapsed">
+    <div id="panel-toggle" onclick="togglePanel()">
+      <span class="chevron">&#9650;</span>
+      <span id="panel-title">Click any point to analyze</span>
+    </div>
+    <div id="panel-body">
+      <div id="panel-summary">
+        <p style="color:#6b7280;font-size:11px;line-height:1.5">
+          <b style="color:#60a5fa">White dots</b> = unanalyzed&nbsp;&nbsp;
+          <b style="color:#2ecc71">Colored</b> = analyzed<br>
+          Click dot or map to analyze. Draw rectangle for batch.
+        </p>
+      </div>
+      <div id="panel-figures"><div class="no-img">Select a point to view analysis diagrams</div></div>
+      <div id="panel-batch-list"></div>
     </div>
   </div>
 </div>
 
-<!-- ── Map overlays ──────────────────────────────────────────────────── -->
-<div id="legend">
-  <h4>Risk Tier</h4>
-  <div class="leg-row"><div class="leg-dot" style="background:#4b5563"></div> Not analyzed</div>
-  <div class="leg-row"><div class="leg-dot" style="background:#2ecc71"></div> Low (0–19)</div>
-  <div class="leg-row"><div class="leg-dot" style="background:#f39c12"></div> Moderate (20–44)</div>
-  <div class="leg-row"><div class="leg-dot" style="background:#e67e22"></div> High (45–69)</div>
-  <div class="leg-row"><div class="leg-dot" style="background:#e74c3c"></div> Critical (70–100)</div>
-  <div style="margin-top:6px;font-size:10px;color:#6b7280">Click dot to analyze | Draw rect for batch</div>
+<!-- Lightbox -->
+<div id="lightbox" onclick="closeLightbox()">
+  <button class="close-btn" onclick="closeLightbox()">&times;</button>
+  <img id="lightbox-img" src="" alt="Enlarged diagram" />
 </div>
 
-<div id="instructions">
-  Click any dot to analyze | Draw rectangle to batch-analyze area
-</div>
+<!-- Spinner -->
+<div id="spinner"><div class="spin-ring"></div><p id="spinner-msg">Analysing...</p></div>
 
-<!-- ── Spinner ───────────────────────────────────────────────────────── -->
-<div id="spinner">
-  <div class="spin-ring"></div>
-  <p id="spinner-msg">Analysing…</p>
-</div>
-
-<!-- ── Confirm dialog (AOI > threshold) ──────────────────────────────── -->
+<!-- Confirm dialog -->
 <div id="confirm-dialog">
   <div id="confirm-box">
     <h2>Large AOI</h2>
@@ -174,365 +245,585 @@
 </div>
 
 <script>
-// ── Tier styling ────────────────────────────────────────────────────────────
+// ===========================================================================
+// CONSTANTS
+// ===========================================================================
 const TIER_COLOR = { low: '#2ecc71', moderate: '#f39c12', high: '#e67e22', critical: '#e74c3c' };
-const GRAY = '#4b5563';
+const UNANALYZED_FILL   = '#ffffff';
+const UNANALYZED_STROKE = '#6b7280';
+const ANALYZED_RADIUS   = 7;
+const UNANALYZED_RADIUS = 3;
 
-function tierColor(tier) { return TIER_COLOR[tier] || GRAY; }
+// Zoom thresholds
+const ZOOM_COUNTY = 9;    // < 9: county choropleth
+const ZOOM_BG     = 12;   // 9-12: block group choropleth; >= 12: individual dots
 
-// ── Map initialisation ──────────────────────────────────────────────────────
+function tierColor(tier) { return TIER_COLOR[tier] || '#6b7280'; }
+
+function passRateColor(pctFeasible) {
+  // Green (high pass) -> Yellow -> Red (low pass)
+  if (pctFeasible == null || isNaN(pctFeasible)) return '#374151';
+  const p = Math.max(0, Math.min(100, pctFeasible));
+  if (p >= 75) return '#2ecc71';
+  if (p >= 50) return '#f39c12';
+  if (p >= 25) return '#e67e22';
+  return '#e74c3c';
+}
+
+// ===========================================================================
+// MAP INIT
+// ===========================================================================
 const map = L.map('map', {
-  center: [35.5, -79.5], zoom: 7, zoomControl: true,
-  preferCanvas: true,  // Canvas renderer for performance with 20K+ markers
+  center: [35.5, -79.5], zoom: 7,
+  zoomControl: true, preferCanvas: true,
 });
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+  attribution: 'Tiles &copy; Esri', maxZoom: 19,
+}).addTo(map);
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+  maxZoom: 19, opacity: 0.7,
+}).addTo(map);
 
-// Esri satellite tiles
-L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  { attribution: 'Tiles &copy; Esri', maxZoom: 19 }
-).addTo(map);
-
-// Label overlay
-L.tileLayer(
-  'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: 19, opacity: 0.7 }
-).addTo(map);
-
-// ── Leaflet.Draw – rectangle tool ────────────────────────────────────────────
+// Draw control
 const drawnItems = new L.FeatureGroup().addTo(map);
-const drawControl = new L.Control.Draw({
+map.addControl(new L.Control.Draw({
   draw: {
-    polyline: false, polygon: false, circle: false,
-    circlemarker: false, marker: false,
+    polyline: false, polygon: false, circle: false, circlemarker: false, marker: false,
     rectangle: { shapeOptions: { color: '#60a5fa', weight: 2 } },
   },
   edit: { featureGroup: drawnItems },
-});
-map.addControl(drawControl);
+}));
 
-// ── State ───────────────────────────────────────────────────────────────────
-const analyzedMarkers = {};  // location_id → L.circleMarker (colored)
-const grayMarkers     = {};  // location_id → L.circleMarker (gray)
-const pointData       = {};  // location_id → { lat, lon, ... full API result if analyzed }
+// ===========================================================================
+// STATE
+// ===========================================================================
+const analyzedMarkers = {};   // lid -> L.circleMarker
+const whiteMarkers    = {};   // lid -> L.circleMarker (viewport unanalyzed)
+const pointData       = {};   // lid -> full result dict
 let pendingBbox       = null;
 
-// ── Sidebar helpers ─────────────────────────────────────────────────────────
-function setStatus(msg) {
-  document.getElementById('status-bar').textContent = msg;
+// Choropleth layers (loaded once, toggled by zoom)
+let countyLayer  = null;
+let bgLayer      = null;
+let currentMode  = null;   // 'county' | 'blockgroup' | 'dots'
+let _moveTimer   = null;
+let _viewportAbort = null;
+
+// ===========================================================================
+// BOTTOM PANEL
+// ===========================================================================
+const bottomPanel  = document.getElementById('bottom-panel');
+const panelTitle   = document.getElementById('panel-title');
+const panelSummary = document.getElementById('panel-summary');
+const panelFigures = document.getElementById('panel-figures');
+const panelBatch   = document.getElementById('panel-batch-list');
+
+function togglePanel() {
+  bottomPanel.classList.toggle('collapsed');
+  setTimeout(() => map.invalidateSize(), 350);
 }
 
-function showResult(r, title) {
-  const sc = document.getElementById('sidebar-content');
-  const tierClass = `tier-${r.risk_tier}`;
-  const feasStr   = r.feasible ? 'Yes' : `No (${r.failure_mode || '—'})`;
-  const bnHtml    = r.best_nearby && r.best_nearby.risk_delta != null
-    ? `<tr><td>Best nearby</td><td>${r.best_nearby.distance_m?.toFixed(0)} m  delta ${r.best_nearby.risk_delta?.toFixed(0)} pts</td></tr>`
-    : '';
-  const warnHtml = r.warnings
-    ? `<p style="color:#f59e0b;font-size:10px;margin-top:8px;line-height:1.5">${r.warnings}</p>`
-    : '';
-  const pngHtml = r.png_url
-    ? `<div class="card-img"><img src="${r.png_url}?t=${Date.now()}" alt="Risk diagram" loading="lazy" /></div>`
-    : '';
+function openPanel(title, mode) {
+  panelTitle.textContent = title || '';
+  bottomPanel.classList.remove('collapsed');
+  if (mode === 'batch') {
+    bottomPanel.classList.remove('expanded'); bottomPanel.classList.add('tall');
+    panelFigures.style.display = 'none'; panelBatch.style.display = 'block';
+  } else {
+    bottomPanel.classList.remove('tall'); bottomPanel.classList.add('expanded');
+    panelFigures.style.display = 'flex'; panelBatch.style.display = 'none';
+  }
+  setTimeout(() => map.invalidateSize(), 350);
+}
 
-  sc.innerHTML = `
+function setStatus(msg) { document.getElementById('status-bar').textContent = msg; }
+
+// ===========================================================================
+// LIGHTBOX
+// ===========================================================================
+function openLightbox(src) {
+  document.getElementById('lightbox-img').src = src;
+  document.getElementById('lightbox').classList.add('active');
+}
+function closeLightbox() { document.getElementById('lightbox').classList.remove('active'); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLightbox(); });
+
+// ===========================================================================
+// SHOW RESULTS
+// ===========================================================================
+function showResult(r, title) {
+  const feasStr = r.feasible ? 'Yes' : ('No' + (r.failure_mode ? ' (' + r.failure_mode + ')' : ''));
+  panelSummary.innerHTML = `
     <div class="result-card">
-      <div class="card-header ${tierClass}">
-        ${r.risk_tier.toUpperCase()} — Score ${r.risk_score?.toFixed(0)}/100
-        <span style="font-size:10px;margin-left:auto;font-weight:400">${title}</span>
+      <div class="card-header tier-${r.risk_tier}">
+        ${r.risk_tier.toUpperCase()} &mdash; ${(r.risk_score || 0).toFixed(0)}/100
+        <span style="font-size:10px;margin-left:auto;font-weight:400">${title || ''}</span>
       </div>
-      <div class="card-body">
-        <table>
-          <tr><td>Location ID</td><td>${r.location_id}</td></tr>
-          <tr><td>Coords</td><td>${r.lat?.toFixed(5)}, ${r.lon?.toFixed(5)}</td></tr>
-          <tr><td>Feasible</td><td>${feasStr}</td></tr>
-          <tr><td>Dominant</td><td>${r.dominant}</td></tr>
-          <tr><td>Slope</td><td>${r.slope_deg?.toFixed(1) || '—'}</td></tr>
-          <tr><td>Canopy max</td><td>${r.canopy_max_m?.toFixed(0) || '—'} m</td></tr>
-          <tr><td>Buildings</td><td>${r.building_count ?? '—'}</td></tr>
-          ${bnHtml}
-        </table>
-        ${warnHtml}
-      </div>
-      ${pngHtml}
+      <div class="card-body"><table>
+        <tr><td>ID</td><td>${r.location_id}</td></tr>
+        <tr><td>Coords</td><td>${(r.lat||0).toFixed(5)}, ${(r.lon||0).toFixed(5)}</td></tr>
+        <tr><td>Feasible</td><td>${feasStr}</td></tr>
+        <tr><td>Dominant</td><td>${r.dominant || '&mdash;'}</td></tr>
+        <tr><td>Slope</td><td>${(r.slope_deg||0).toFixed(1)}&deg;</td></tr>
+        <tr><td>Canopy max</td><td>${(r.canopy_max_m||0).toFixed(0)} m</td></tr>
+        <tr><td>Buildings</td><td>${r.building_count ?? '&mdash;'}</td></tr>
+      </table></div>
     </div>`;
+  // Show 5 individual panels if available, otherwise combined PNG
+  if (r.panels && r.panels.length > 0) {
+    const t = Date.now();
+    panelFigures.innerHTML = r.panels.map(function(p) {
+      const src = p.url + '?t=' + t;
+      return '<div class="panel-card" onclick="openLightbox(\'' + src + '\')" title="' + p.title + ' (click to enlarge)">' +
+        '<img src="' + src + '" alt="' + p.title + '" />' +
+        '<div class="panel-label">' + p.title + '</div></div>';
+    }).join('');
+  } else if (r.png_url) {
+    const src = r.png_url + '?t=' + Date.now();
+    panelFigures.innerHTML = '<img src="' + src + '" alt="5-panel risk diagram" onclick="openLightbox(\'' + src + '\')" title="Click to enlarge" />';
+  } else {
+    panelFigures.innerHTML = '<div class="no-img">No diagnostic image available</div>';
+  }
+  openPanel(r.risk_tier.toUpperCase() + ' ' + (r.risk_score||0).toFixed(0) + '/100 &mdash; ' + r.location_id, 'single');
 }
 
 function showBatchResults(results) {
-  const sc = document.getElementById('sidebar-content');
   const tiers = { low: 0, moderate: 0, high: 0, critical: 0 };
   results.forEach(r => { tiers[r.risk_tier] = (tiers[r.risk_tier] || 0) + 1; });
-  const n = results.length;
-  const nFeasible = results.filter(r => r.feasible).length;
-
-  const tierHtml = Object.entries(tiers)
-    .filter(([, v]) => v > 0)
-    .map(([t, v]) => `<span style="color:${tierColor(t)}">${v} ${t}</span>`)
-    .join(' &nbsp;');
-
-  sc.innerHTML = `
+  const n = results.length, nF = results.filter(r => r.feasible).length;
+  const tierHtml = Object.entries(tiers).filter(([,v]) => v > 0)
+    .map(([t,v]) => '<span style="color:' + tierColor(t) + '">' + v + ' ' + t + '</span>').join(' &nbsp;');
+  panelSummary.innerHTML = `
     <div class="result-card">
-      <div class="card-header" style="background:#1e3a5f;color:#bfdbfe">
-        AOI Batch — ${n} points analyzed
-      </div>
-      <div class="card-body">
-        <table>
-          <tr><td>Feasible</td><td>${nFeasible} / ${n} (${(100*nFeasible/n).toFixed(0)}%)</td></tr>
-          <tr><td>Tiers</td><td>${tierHtml}</td></tr>
-          <tr><td>Mean risk</td><td>${(results.reduce((a,r)=>a+r.risk_score,0)/n).toFixed(1)}/100</td></tr>
-        </table>
-      </div>
+      <div class="card-header" style="background:#1e3a5f;color:#bfdbfe">AOI Batch &mdash; ${n} points</div>
+      <div class="card-body"><table>
+        <tr><td>Feasible</td><td>${nF}/${n} (${(100*nF/n).toFixed(0)}%)</td></tr>
+        <tr><td>Tiers</td><td>${tierHtml}</td></tr>
+        <tr><td>Mean risk</td><td>${(results.reduce((a,r)=>a+r.risk_score,0)/n).toFixed(1)}/100</td></tr>
+      </table></div>
     </div>`;
-
+  panelBatch.innerHTML = '';
   results.forEach(r => {
-    const div = document.createElement('div');
-    div.className = 'result-card';
-    div.innerHTML = `
-      <div class="card-header tier-${r.risk_tier}" style="cursor:pointer" onclick="map.panTo([${r.lat},${r.lon}]);map.setZoom(14)">
-        ${r.risk_tier.toUpperCase()} ${r.risk_score?.toFixed(0)}/100 — ${r.location_id}
-      </div>`;
-    sc.appendChild(div);
+    const row = document.createElement('div'); row.className = 'batch-row';
+    row.innerHTML = '<div class="batch-dot" style="background:' + tierColor(r.risk_tier) + '"></div>' +
+      '<span style="color:#f3f4f6;font-weight:600">' + r.risk_tier.toUpperCase() + ' ' + (r.risk_score||0).toFixed(0) + '</span>' +
+      '<span style="color:#6b7280">' + r.location_id + '</span>' +
+      '<span style="color:#6b7280;margin-left:auto">' + (r.feasible ? 'feasible' : (r.failure_mode || 'infeasible')) + '</span>';
+    row.onclick = () => { showResult(r, 'batch'); map.panTo([r.lat, r.lon]); if (map.getZoom() < 14) map.setZoom(14); };
+    panelBatch.appendChild(row);
   });
+  openPanel('AOI Batch &mdash; ' + n + ' points analyzed', 'batch');
 }
 
-// ── Spinner helpers ─────────────────────────────────────────────────────────
+// ===========================================================================
+// SPINNER
+// ===========================================================================
 function showSpinner(msg) {
-  document.getElementById('spinner-msg').textContent = msg || 'Analysing…';
+  document.getElementById('spinner-msg').textContent = msg || 'Analysing...';
   document.getElementById('spinner').classList.add('active');
 }
-function hideSpinner() {
-  document.getElementById('spinner').classList.remove('active');
-}
+function hideSpinner() { document.getElementById('spinner').classList.remove('active'); }
 
-// ── Upgrade a gray dot to a colored analyzed dot ────────────────────────────
-function upgradeToAnalyzed(r) {
-  const lid = r.location_id;
-  // Remove gray marker if present
-  if (grayMarkers[lid]) {
-    map.removeLayer(grayMarkers[lid]);
-    delete grayMarkers[lid];
-  }
-  // Remove old analyzed marker if present
-  if (analyzedMarkers[lid]) {
-    map.removeLayer(analyzedMarkers[lid]);
-  }
-  // Add colored marker
+// ===========================================================================
+// MARKER MANAGEMENT
+// ===========================================================================
+
+/** Add or update an analyzed point marker (colored, larger) */
+function addAnalyzedMarker(r) {
+  const lid = String(r.location_id);
+  // Remove white marker if exists
+  if (whiteMarkers[lid]) { map.removeLayer(whiteMarkers[lid]); delete whiteMarkers[lid]; }
+  // Remove old analyzed marker
+  if (analyzedMarkers[lid]) { map.removeLayer(analyzedMarkers[lid]); }
   const color = tierColor(r.risk_tier);
   const m = L.circleMarker([r.lat, r.lon], {
-    radius: 6, color: color, fillColor: color,
-    fillOpacity: 0.85, weight: r.feasible ? 1 : 2,
-    opacity: 1,
+    radius: ANALYZED_RADIUS, color: color, fillColor: color,
+    fillOpacity: 0.85, weight: r.feasible ? 1 : 2.5, opacity: 1,
   }).addTo(map);
   m.bindTooltip(
-    `${r.risk_tier.toUpperCase()} ${r.risk_score?.toFixed(0)}/100 — ${r.dominant} [${lid}]`,
+    r.risk_tier.toUpperCase() + ' ' + (r.risk_score||0).toFixed(0) + '/100 &mdash; ' + (r.dominant||'') + ' [' + lid + ']',
     { direction: 'top', offset: [0, -6] }
   );
-  m.on('click', () => {
-    showResult(r, 'pre-computed');
+  m.on('click', (e) => {
+    L.DomEvent.stopPropagation(e);
+    showResult(pointData[lid] || r, r._source || 'pre-computed');
     map.panTo([r.lat, r.lon]);
   });
   analyzedMarkers[lid] = m;
   pointData[lid] = r;
 }
 
-// ── Load all points (gray + analyzed) ────────────────────────────────────────
-async function loadAllPoints() {
-  setStatus('Loading dataset…');
+function clearWhiteMarkers() {
+  Object.values(whiteMarkers).forEach(m => map.removeLayer(m));
+  for (const k in whiteMarkers) delete whiteMarkers[k];
+}
+
+// ===========================================================================
+// DATA LOADING
+// ===========================================================================
+
+/** 1. Load ALL analyzed points (unified) — runs once at boot */
+async function loadAnalyzedPoints() {
   try {
-    const res = await fetch('/api/all_points');
+    const res = await fetch('/api/precomputed');
+    if (!res.ok) throw new Error('precomputed ' + res.status);
     const data = await res.json();
-    let nAnalyzed = 0;
-    let nGray = 0;
+    console.log('[boot] Loaded ' + data.length + ' analyzed points');
+    data.forEach(r => {
+      r.lat = r.lat || r.latitude;
+      r.lon = r.lon || r.longitude;
+      if (r.lat == null || r.lon == null) return;
+      addAnalyzedMarker(r);
+    });
+    document.getElementById('n-analyzed').textContent = Object.keys(analyzedMarkers).length;
+  } catch (e) { console.error('Failed to load analyzed points:', e); }
+}
 
-    data.forEach(pt => {
-      if (pt.z === 1) {
-        // Analyzed point — colored marker
-        nAnalyzed++;
-        const r = {
-          location_id: pt.i, lat: pt.a, lon: pt.o,
-          risk_tier: pt.t, feasible: pt.f, risk_score: pt.s,
-          dominant: '—', slope_deg: 0, canopy_max_m: 0, building_count: 0,
-          warnings: '', _source: 'batch',
+/** 2. Load county choropleth (once) */
+async function loadCountyChoropleth() {
+  try {
+    const res = await fetch('/api/county_geojson');
+    if (!res.ok) return;
+    const geojson = await res.json();
+    if (!geojson || !geojson.features || !geojson.features.length) return;
+
+    countyLayer = L.geoJSON(geojson, {
+      style: function(f) {
+        const p = f.properties;
+        return {
+          fillColor: passRateColor(p.pct_feasible),
+          fillOpacity: 0.5,
+          color: '#d1d5db',
+          weight: 1.5,
+          opacity: 0.8,
         };
-        upgradeToAnalyzed(r);
-      } else {
-        // Unanalyzed — gray dot
-        nGray++;
-        const m = L.circleMarker([pt.a, pt.o], {
-          radius: 3, color: GRAY, fillColor: GRAY,
-          fillOpacity: 0.5, weight: 0.5,
-        }).addTo(map);
-        m.on('click', () => analyzePoint(pt.i, pt.a, pt.o));
-        grayMarkers[pt.i] = m;
-      }
+      },
+      onEachFeature: function(f, layer) {
+        const p = f.properties;
+        const name = p.NAME || p.name || 'Unknown';
+        const passRate = p.pct_feasible != null ? p.pct_feasible.toFixed(0) + '%' : 'N/A';
+        const risk = p.mean_risk != null ? p.mean_risk.toFixed(1) : 'N/A';
+        const crit = p.pct_critical != null ? p.pct_critical.toFixed(0) + '%' : 'N/A';
+        const nPts = p.n_points || 0;
+        layer.bindTooltip(
+          '<b>' + name + ' County</b><br>' +
+          'Pass rate: ' + passRate + '<br>' +
+          'Mean risk: ' + risk + '/100<br>' +
+          'Critical: ' + crit + '<br>' +
+          'Analyzed: ' + nPts + ' points',
+          { sticky: true }
+        );
+      },
+    });
+    console.log('[boot] County choropleth loaded: ' + geojson.features.length + ' counties');
+  } catch (e) { console.warn('County choropleth load failed:', e); }
+}
+
+/** 3. Load block group choropleth (once) */
+async function loadBlockGroupChoropleth() {
+  try {
+    const res = await fetch('/api/blockgroup_geojson');
+    if (!res.ok) return;
+    const geojson = await res.json();
+    if (!geojson || !geojson.features || !geojson.features.length) return;
+
+    bgLayer = L.geoJSON(geojson, {
+      style: function(f) {
+        const p = f.properties;
+        if (!p.has_data) {
+          return { fillColor: '#374151', fillOpacity: 0.08, color: '#4b5563', weight: 0.3, opacity: 0.3 };
+        }
+        return {
+          fillColor: passRateColor(p.pct_feasible),
+          fillOpacity: 0.45,
+          color: '#d1d5db',
+          weight: 0.8,
+          opacity: 0.6,
+        };
+      },
+      onEachFeature: function(f, layer) {
+        const p = f.properties;
+        if (!p.has_data) return;
+        const name = p.NAMELSAD || p.GEOID || 'Block Group';
+        const passRate = p.pct_feasible != null ? p.pct_feasible.toFixed(0) + '%' : 'N/A';
+        layer.bindTooltip(
+          '<b>' + name + '</b><br>' +
+          'Pass rate: ' + passRate + '<br>' +
+          'Mean risk: ' + (p.mean_risk != null ? p.mean_risk.toFixed(1) : 'N/A') + '/100<br>' +
+          'Analyzed: ' + (p.n_points || 0) + ' points',
+          { sticky: true }
+        );
+      },
+    });
+    console.log('[boot] Block group choropleth loaded: ' + geojson.features.length + ' features');
+  } catch (e) { console.warn('Block group choropleth load failed:', e); }
+}
+
+/** 4. Load viewport white dots (only at high zoom) */
+async function loadViewportPoints() {
+  const zoom = map.getZoom();
+  if (zoom < ZOOM_BG) { clearWhiteMarkers(); return; }
+
+  const b = map.getBounds();
+  const params = new URLSearchParams({
+    lat_min: b.getSouth().toFixed(6),
+    lat_max: b.getNorth().toFixed(6),
+    lon_min: b.getWest().toFixed(6),
+    lon_max: b.getEast().toFixed(6),
+  });
+
+  if (_viewportAbort) _viewportAbort.abort();
+  _viewportAbort = new AbortController();
+
+  try {
+    const res = await fetch('/api/points_in_view?' + params, { signal: _viewportAbort.signal });
+    if (!res.ok) return;
+    const data = await res.json();
+
+    clearWhiteMarkers();
+    const analyzedIds = new Set(Object.keys(analyzedMarkers));
+
+    data.points.forEach(function(pt) {
+      if (pt.z === 1 || analyzedIds.has(pt.i)) return;
+      const m = L.circleMarker([pt.a, pt.o], {
+        radius: UNANALYZED_RADIUS,
+        color: UNANALYZED_STROKE,
+        fillColor: UNANALYZED_FILL,
+        fillOpacity: 0.75,
+        weight: 0.8,
+      }).addTo(map);
+      m.on('click', function(e) {
+        L.DomEvent.stopPropagation(e);
+        analyzePoint(pt.i, pt.a, pt.o);
+      });
+      whiteMarkers[pt.i] = m;
     });
 
-    // Now load full precomputed data (with all fields) for the analyzed points
-    const preRes = await fetch('/api/precomputed');
-    const preData = await preRes.json();
-    preData.forEach(r => {
-      upgradeToAnalyzed(r);
-    });
-
-    document.getElementById('n-analyzed').textContent = nAnalyzed;
-    setStatus(`${data.length.toLocaleString()} points loaded (${nAnalyzed} analyzed, ${nGray} pending)`);
+    const trunc = data.truncated
+      ? ' (showing ' + data.n_unanalyzed_shown + ' of ' + data.n_total_in_view.toLocaleString() + ')'
+      : '';
+    setStatus(data.n_total_in_view.toLocaleString() + ' points in view' + trunc + ' | ' + data.n_analyzed + ' analyzed');
   } catch (e) {
-    setStatus('Failed to load dataset');
-    console.error(e);
+    if (e.name !== 'AbortError') console.error('Viewport load failed:', e);
   }
 }
 
-// ── Analyze a specific point by clicking its dot ─────────────────────────────
+// ===========================================================================
+// ZOOM-TIER SWITCHING
+// ===========================================================================
+function updateZoomMode() {
+  const zoom = map.getZoom();
+  let newMode;
+  if (zoom < ZOOM_COUNTY)    newMode = 'county';
+  else if (zoom < ZOOM_BG)   newMode = 'blockgroup';
+  else                        newMode = 'dots';
+
+  const legendMode = document.getElementById('legend-mode');
+
+  if (newMode === currentMode) {
+    // In dots mode, refresh viewport points on pan
+    if (newMode === 'dots') loadViewportPoints();
+    return;
+  }
+
+  // Switching modes — remove old layers
+  if (countyLayer && map.hasLayer(countyLayer)) map.removeLayer(countyLayer);
+  if (bgLayer && map.hasLayer(bgLayer)) map.removeLayer(bgLayer);
+  clearWhiteMarkers();
+
+  currentMode = newMode;
+
+  if (newMode === 'county') {
+    if (countyLayer) countyLayer.addTo(map);
+    legendMode.textContent = 'County choropleth (pass rate)';
+    setStatus('County overview | zoom in for block group detail');
+  } else if (newMode === 'blockgroup') {
+    if (bgLayer) bgLayer.addTo(map);
+    legendMode.textContent = 'Block group choropleth (pass rate)';
+    setStatus('Block group view | zoom in for individual points');
+  } else {
+    legendMode.textContent = 'Individual address points';
+    loadViewportPoints();
+  }
+}
+
+// ===========================================================================
+// ANALYZE POINT (on-demand)
+// ===========================================================================
 async function analyzePoint(locationId, lat, lon) {
-  showSpinner(`Analyzing ${locationId}…`);
-  setStatus(`Analyzing ${locationId}…`);
+  showSpinner('Analyzing point ' + locationId);
+  setStatus('Analyzing ' + locationId + '...');
   try {
     const anaRes = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lat, lon, location_id: locationId, run_search: true }),
+      body: JSON.stringify({ lat: lat, lon: lon, location_id: locationId, run_search: true }),
     });
     if (!anaRes.ok) throw new Error(await anaRes.text());
     const { job_id } = await anaRes.json();
-
     let elapsed = 0;
-    const job = await pollJob(job_id, 2000, () => {
+    const job = await pollJob(job_id, 2000, function() {
       elapsed += 2;
-      showSpinner(`Analyzing ${locationId}… (${elapsed}s)`);
+      showSpinner('Analyzing point ' + locationId + ' (' + elapsed + 's)');
     });
-
     if (job.status === 'error') throw new Error(job.error);
-
     const result = job.result;
-    upgradeToAnalyzed(result);
-    showResult(result, `On-demand (${result.total_elapsed_s}s)`);
+    addAnalyzedMarker(result);
+    document.getElementById('n-analyzed').textContent = Object.keys(analyzedMarkers).length;
+    showResult(result, 'On-demand (' + result.total_elapsed_s + 's)');
     map.panTo([result.lat, result.lon]);
     if (map.getZoom() < 12) map.setZoom(12);
-    setStatus(`Done: ${result.risk_tier.toUpperCase()} ${result.risk_score?.toFixed(0)}/100 (${result.total_elapsed_s}s)`);
+    setStatus('Done: ' + result.risk_tier.toUpperCase() + ' ' + (result.risk_score||0).toFixed(0) + '/100 (' + result.total_elapsed_s + 's)');
   } catch (err) {
-    setStatus(`Error: ${err.message}`);
+    setStatus('Error: ' + err.message);
     console.error(err);
   } finally {
     hideSpinner();
   }
 }
 
-// ── Click on map (not on a marker) → find nearest dataset point → analyze ───
-map.on('click', async (e) => {
-  // Don't trigger if a marker was clicked (handled by marker click events)
-  if (e.originalEvent._stopped) return;
-
-  const { lat, lng } = e.latlng;
-  showSpinner('Finding nearest address…');
-  setStatus('Finding nearest address…');
+// ===========================================================================
+// MAP CLICK -> nearest point -> analyze
+// ===========================================================================
+map.on('click', async function(e) {
+  if (e.originalEvent && e.originalEvent._stopped) return;
+  // Only trigger at high zoom where individual points are visible
+  if (map.getZoom() < ZOOM_BG) return;
+  const lat = e.latlng.lat, lng = e.latlng.lng;
+  showSpinner('Finding nearest address...');
+  setStatus('Finding nearest address...');
   try {
-    const nearRes = await fetch(`/api/nearest?lat=${lat}&lon=${lng}`);
+    const nearRes = await fetch('/api/nearest?lat=' + lat + '&lon=' + lng);
     if (!nearRes.ok) throw new Error(await nearRes.text());
     const nearest = await nearRes.json();
     await analyzePoint(nearest.location_id, nearest.lat, nearest.lon);
   } catch (err) {
-    setStatus(`Error: ${err.message}`);
+    setStatus('Error: ' + err.message);
     console.error(err);
     hideSpinner();
   }
 });
 
-// ── Job polling helper ──────────────────────────────────────────────────────
+// ===========================================================================
+// JOB POLLING
+// ===========================================================================
 async function pollJob(jobId, intervalMs, onProgress) {
   while (true) {
-    await new Promise(r => setTimeout(r, intervalMs));
-    const res = await fetch(`/api/status/${jobId}`);
-    if (!res.ok) throw new Error(`Status poll failed (${res.status})`);
+    await new Promise(function(r) { setTimeout(r, intervalMs); });
+    const res = await fetch('/api/status/' + jobId);
+    if (!res.ok) throw new Error('Status poll failed (' + res.status + ')');
     const job = await res.json();
     if (onProgress) onProgress(job);
     if (job.status === 'done' || job.status === 'error') return job;
   }
 }
 
-// ── Rectangle draw → AOI batch ──────────────────────────────────────────────
-map.on(L.Draw.Event.CREATED, async (e) => {
+// ===========================================================================
+// AOI BATCH (draw rectangle)
+// ===========================================================================
+map.on(L.Draw.Event.CREATED, async function(e) {
   drawnItems.clearLayers();
   drawnItems.addLayer(e.layer);
-
   const b = e.layer.getBounds();
-  const bbox = {
+  await runAoiBatch({
     lat_min: b.getSouth(), lat_max: b.getNorth(),
-    lon_min: b.getWest(),  lon_max: b.getEast(),
+    lon_min: b.getWest(), lon_max: b.getEast(),
     confirmed: false,
-  };
-
-  await runAoiBatch(bbox);
+  });
 });
 
 async function runAoiBatch(bbox) {
-  showSpinner('Counting points in AOI…');
-  setStatus('Counting points in AOI…');
+  showSpinner('Counting points in AOI...');
+  setStatus('Counting points in AOI...');
   try {
     const res = await fetch('/api/analyze_bbox', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(bbox),
     });
-
     const data = await res.json();
 
     if (data.status === 'confirmation_required') {
       hideSpinner();
-      pendingBbox = { ...bbox, confirmed: true };
+      pendingBbox = Object.assign({}, bbox, { confirmed: true });
       document.getElementById('confirm-msg').textContent = data.message;
       document.getElementById('confirm-dialog').classList.add('active');
       return;
     }
-
     if (data.status === 'empty') {
       setStatus('No data points in selected area.');
       hideSpinner();
       return;
     }
 
-    const { job_id, n_points } = data;
-    showSpinner(`AOI batch: 0 / ${n_points} points…`);
-    setStatus(`AOI batch started (${n_points} pts)…`);
-
-    const job = await pollJob(job_id, 3000, (j) => {
-      const done = j.completed || 0;
-      const total = j.total || n_points;
-      showSpinner(`AOI batch: ${done} / ${total} points…`);
-      setStatus(`AOI batch: ${done}/${total} complete…`);
+    const job_id = data.job_id, n_points = data.n_points;
+    showSpinner('AOI batch: 0 / ' + n_points + ' points...');
+    const job = await pollJob(job_id, 3000, function(j) {
+      showSpinner('AOI batch: ' + (j.completed || 0) + ' / ' + (j.total || n_points) + ' points...');
+      setStatus('AOI batch: ' + (j.completed || 0) + '/' + (j.total || n_points) + ' complete...');
     });
-
     if (job.status === 'error') throw new Error(job.error || 'Batch failed');
-
-    setStatus(`AOI batch: ${job.n_points} points complete`);
-    job.results.forEach(r => upgradeToAnalyzed(r));
+    setStatus('AOI batch: ' + job.n_points + ' points complete');
+    job.results.forEach(function(r) { addAnalyzedMarker(r); });
+    document.getElementById('n-analyzed').textContent = Object.keys(analyzedMarkers).length;
     showBatchResults(job.results);
-    if (job.errors?.length) console.warn('Batch errors:', job.errors);
   } catch (err) {
-    setStatus(`Batch error: ${err.message}`);
+    setStatus('Batch error: ' + err.message);
     console.error(err);
   } finally {
     hideSpinner();
   }
 }
 
-// Confirm dialog buttons
-document.getElementById('confirm-yes').onclick = async () => {
+document.getElementById('confirm-yes').onclick = async function() {
   document.getElementById('confirm-dialog').classList.remove('active');
   if (pendingBbox) {
-    showSpinner('Analysing AOI (up to 100 points)…');
+    showSpinner('Analysing AOI...');
     await runAoiBatch(pendingBbox);
     pendingBbox = null;
   }
 };
-document.getElementById('confirm-no').onclick = () => {
+document.getElementById('confirm-no').onclick = function() {
   document.getElementById('confirm-dialog').classList.remove('active');
   drawnItems.clearLayers();
   setStatus('AOI cancelled.');
   pendingBbox = null;
 };
 
-// ── Boot ─────────────────────────────────────────────────────────────────────
-loadAllPoints();
+// ===========================================================================
+// EVENT: zoom/pan -> update layers
+// ===========================================================================
+map.on('moveend', function() {
+  clearTimeout(_moveTimer);
+  _moveTimer = setTimeout(updateZoomMode, 200);
+});
+map.on('zoomend', function() {
+  clearTimeout(_moveTimer);
+  _moveTimer = setTimeout(updateZoomMode, 100);
+});
+
+// ===========================================================================
+// BOOT
+// ===========================================================================
+(async function() {
+  setStatus('Loading choropleth layers...');
+
+  // Load all three data sources in parallel
+  await Promise.all([
+    loadAnalyzedPoints(),
+    loadCountyChoropleth(),
+    loadBlockGroupChoropleth(),
+  ]);
+
+  // Set initial mode (should be 'county' at zoom 7)
+  currentMode = null;  // force first switch
+  updateZoomMode();
+
+  setStatus('Ready | ' + Object.keys(analyzedMarkers).length + ' analyzed points loaded');
+  console.log('[boot] Ready. Analyzed: ' + Object.keys(analyzedMarkers).length +
+    ' | County layer: ' + (countyLayer ? 'OK' : 'MISSING') +
+    ' | BG layer: ' + (bgLayer ? 'OK' : 'MISSING'));
+})();
 </script>
 </body>
 </html>
