@@ -205,6 +205,70 @@ def _plot_point(result: dict, out_path: Path):
     plt.close(fig)
     logger.info(f"Saved: {out_path}")
 
+    # Also save individual panels as separate figures
+    _save_individual_panels(result, out_path.parent)
+
+
+PANEL_NAMES = ["terrain", "canopy_buildings", "constraints", "horizon", "neighborhood"]
+PANEL_TITLES = [
+    "Terrain (far-field, 1500 m)",
+    "Canopy + Buildings (100 m)",
+    "Feasibility Constraints",
+    "Horizon Profile",
+    "Neighbourhood Suitability",
+]
+
+
+def _save_individual_panels(result: dict, out_dir: Path):
+    """Render and save each of the 5 panels as a standalone figure."""
+    lat, lon = result["lat"], result["lon"]
+    rk = result["risk"]
+    cl = result["classification"]
+    dom = cl["dominant"]
+    dom_col = DOMINANT_COLORS[dom]
+
+    canopy_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "canopy", ["#d4edda", "#52b788", "#1b4332"])
+
+    def hillshade_norm(dem):
+        filled = np.where(np.isnan(dem), np.nanmedian(dem), dem)
+        hs = LightSource(azdeg=315, altdeg=35).hillshade(filled, vert_exag=4)
+        rng = np.ptp(filled) + 1e-9
+        nrm = (filled - filled.min()) / rng
+        return hs, nrm
+
+    def ext(bbox):
+        w, s, e, n = bbox
+        return [w, e, s, n]
+
+    hz_far = np.array(result["horizon"]["terrain_far"])
+    hz_canopy = np.array(result["horizon"]["canopy"])
+    hz_full = np.array(result["horizon"]["full"])
+    n_az = result["horizon"]["n_azimuths"]
+
+    # Panel renderers: each creates a single-panel figure and saves it
+    panel_fns = [
+        lambda fig, gs: _plot_terrain_panel(fig, gs, result, ext, hillshade_norm, lat, lon),
+        lambda fig, gs: _plot_near_panel(fig, gs, result, ext, hillshade_norm, canopy_cmap, lat, lon),
+        lambda fig, gs: _plot_constraints_panel(fig, gs, result),
+        lambda fig, gs: _plot_polar_panel(fig, gs, hz_far, hz_canopy, hz_full, n_az, dom, dom_col, rk),
+        lambda fig, gs: _plot_suitability_panel(fig, gs, result, lat, lon),
+    ]
+
+    for name, title, fn in zip(PANEL_NAMES, PANEL_TITLES, panel_fns):
+        try:
+            fig = plt.figure(figsize=(5, 5), facecolor="#111827")
+            gs = fig.add_gridspec(1, 1)
+            fn(fig, gs[0])
+            fig.suptitle(title, color="white", fontsize=9, y=0.98, fontweight="bold")
+            panel_path = out_dir / f"panel_{name}.png"
+            plt.savefig(panel_path, dpi=130, bbox_inches="tight",
+                        facecolor=fig.get_facecolor())
+            plt.close(fig)
+        except Exception as exc:
+            logger.warning(f"Panel {name} failed: {exc}")
+            plt.close("all")
+
 
 def _plot_terrain_panel(fig, gs_pos, result, ext_fn, hillshade_norm, lat, lon):
     """Far-field terrain panel — only if _terrain_far_array attached."""

@@ -136,6 +136,17 @@
     }
     #instructions b { color: #d1d5db; }
 
+    /* -- Update Zonal button -- */
+    #btn-update-zonal {
+      position: absolute; bottom: 10px; right: 10px; z-index: 800;
+      background: #1e3a5f; color: #bfdbfe; border: 1px solid #3b82f6;
+      border-radius: 6px; padding: 7px 14px; font-size: 11px;
+      font-weight: 600; cursor: pointer; pointer-events: auto;
+      transition: background 0.15s;
+    }
+    #btn-update-zonal:hover { background: #2563eb; }
+    #btn-update-zonal:disabled { opacity: 0.5; cursor: default; }
+
     /* -- Make draw toolbar more visible -- */
     .leaflet-draw-toolbar a { width: 32px !important; height: 32px !important; line-height: 32px !important; }
     .leaflet-draw-section { background: rgba(31,41,55,0.95) !important; border-radius: 6px !important; }
@@ -203,6 +214,11 @@
       <b>Draw rectangle</b> for batch |
       Zoom for detail
     </div>
+
+    <!-- Update Zonal Statistics button (BOTTOM RIGHT) -->
+    <button id="btn-update-zonal" onclick="updateZonalStats()">
+      Update Zonal Statistics
+    </button>
   </div>
 
   <!-- Bottom panel -->
@@ -801,6 +817,43 @@ map.on('zoomend', function() {
   clearTimeout(_moveTimer);
   _moveTimer = setTimeout(updateZoomMode, 100);
 });
+
+// ===========================================================================
+// UPDATE ZONAL STATISTICS
+// ===========================================================================
+async function updateZonalStats() {
+  var btn = document.getElementById('btn-update-zonal');
+  btn.disabled = true;
+  btn.textContent = 'Updating...';
+  setStatus('Recomputing zonal statistics...');
+  try {
+    var res = await fetch('/api/update_zonal', { method: 'POST' });
+    if (!res.ok) throw new Error('Update failed: ' + res.status);
+    var data = await res.json();
+    if (data.status !== 'ok') throw new Error(data.message || 'Unknown error');
+
+    // Reload choropleth layers with new data
+    if (countyLayer && map.hasLayer(countyLayer)) map.removeLayer(countyLayer);
+    if (bgLayer && map.hasLayer(bgLayer)) map.removeLayer(bgLayer);
+    countyLayer = null;
+    bgLayer = null;
+
+    await Promise.all([loadCountyChoropleth(), loadBlockGroupChoropleth()]);
+
+    // Force re-apply current zoom mode
+    currentMode = null;
+    updateZoomMode();
+
+    setStatus('Zonal stats updated: ' + data.n_counties + ' counties, ' + data.n_block_groups + ' block groups from ' + data.n_analyzed + ' points');
+    btn.textContent = 'Updated!';
+    setTimeout(function() { btn.textContent = 'Update Zonal Statistics'; btn.disabled = false; }, 3000);
+  } catch (err) {
+    setStatus('Zonal update error: ' + err.message);
+    console.error(err);
+    btn.textContent = 'Update Zonal Statistics';
+    btn.disabled = false;
+  }
+}
 
 // ===========================================================================
 // BOOT

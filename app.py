@@ -268,13 +268,17 @@ def _get_panel_urls(lid: str) -> list[dict] | None:
 
 
 def _split_combined_png(lid: str):
-    """Split a combined 5-panel PNG into individual panels (if not already done)."""
+    """Crop-split a combined 5-panel PNG into individual panels (fallback).
+
+    Used only for legacy points that have a combined PNG but no individual panels.
+    New analyses generate proper individual panels via _save_individual_panels().
+    """
     report_dir = OUT_DIR / "reports" / lid
     combined = report_dir / f"{lid}.png"
     if not combined.exists():
         return
     if (report_dir / f"panel_{PANEL_NAMES[0]}.png").exists():
-        return  # already split
+        return  # already has panels
     try:
         from PIL import Image
         img = Image.open(combined)
@@ -477,6 +481,112 @@ async def reload_precomputed():
     rows = _load_precomputed()
     logger.info(f"[api/reload] Reloaded {len(rows)} pre-computed results from disk")
     return JSONResponse(content={"status": "ok", "n_results": len(rows)})
+
+
+@app.post("/api/update_zonal")
+async def update_zonal():
+    """Recompute county + block group zonal summaries from ALL analyzed points.
+
+    Joins analyzed results with the full dataset (via geoid_cb) to assign each
+    analyzed point to a county and block group, then aggregates pass rate and
+    risk statistics. Invalidates the choropleth caches so the next fetch picks
+    up the new data.
+    """
+    global _bg_geojson_cache, _county_geojson_cache
+
+    precomputed = _load_precomputed()
+    df_full = _load_challenge_df()
+
+    # Build analyzed DataFrame
+    rows = []
+    for r in precomputed:
+        lat = r.get("lat") or r.get("latitude")
+        lon = r.get("lon") or r.get("longitude")
+        if lat is None or lon is None:
+            continue
+        rows.append({
+            "location_id": str(r.get("location_id", "")),
+            "lat": float(lat),
+            "lon": float(lon),
+            "feasible": bool(r.get("feasible", True)),
+            "risk_score": float(r.get("risk_score", 0)),
+            "risk_tier": str(r.get("risk_tier", "low")),
+            "dominant": str(r.get("dominant", "clear")),
+        })
+
+    if not rows:
+        return JSONResponse(content={"status": "error", "message": "No analyzed points"})
+
+    adf = pd.DataFrame(rows)
+    adf["location_id"] = adf["location_id"].astype(str)
+
+    # Join with full dataset to get geoid_cb
+    df_full["location_id"] = df_full["location_id"].astype(str)
+    merged = adf.merge(
+        df_full[["location_id", "geoid_cb"]],
+        on="location_id", how="left",
+    )
+
+    # Derive county_fips (first 5 digits) and block_group (first 12 digits)
+    merged["geoid_cb"] = merged["geoid_cb"].astype(str)
+    merged["county_fips"] = merged["geoid_cb"].str[:5]
+    merged["geoid_bg"] = merged["geoid_cb"].str[:12]
+
+    # Filter out rows without valid geoid
+    merged = merged[merged["geoid_cb"].str.len() >= 12]
+
+    def _summarize(group_col: str) -> pd.DataFrame:
+        g = merged.groupby(group_col)
+        summary = g.agg(
+            n_points=("risk_score", "size"),
+            mean_risk=("risk_score", "mean"),
+            median_risk=("risk_score", "median"),
+            n_feasible=("feasible", "sum"),
+        ).reset_index()
+        summary["pct_feasible"] = (summary["n_feasible"] / summary["n_points"] * 100).round(1)
+        summary["n_infeasible"] = summary["n_points"] - summary["n_feasible"]
+
+        # Tier percentages
+        for tier in ["low", "moderate", "high", "critical"]:
+            tier_counts = merged[merged["risk_tier"] == tier].groupby(group_col).size()
+            summary[f"pct_{tier}"] = (tier_counts.reindex(summary[group_col]).fillna(0).values
+                                      / summary["n_points"] * 100).round(1)
+
+        # Dominant mode
+        dom_mode = merged.groupby(group_col)["dominant"].agg(
+            lambda x: x.value_counts().index[0] if len(x) > 0 else "clear"
+        )
+        summary["dominant_mode"] = dom_mode.reindex(summary[group_col]).values
+
+        summary["mean_risk"] = summary["mean_risk"].round(1)
+        summary["median_risk"] = summary["median_risk"].round(1)
+        return summary
+
+    # County summary
+    county_summary = _summarize("county_fips")
+    county_csv = OUT_DIR / "zonal" / "county_summary.csv"
+    county_csv.parent.mkdir(parents=True, exist_ok=True)
+    county_summary.to_csv(county_csv, index=False)
+
+    # Block group summary
+    bg_summary = _summarize("geoid_bg")
+    bg_csv = OUT_DIR / "zonal" / "block_group_summary.csv"
+    bg_summary.to_csv(bg_csv, index=False)
+
+    # Invalidate choropleth caches
+    _bg_geojson_cache = None
+    _county_geojson_cache = None
+
+    n_counties = len(county_summary)
+    n_bgs = len(bg_summary)
+    logger.info(f"[update_zonal] Updated: {n_counties} counties, {n_bgs} block groups from {len(merged)} points")
+
+    return JSONResponse(content={
+        "status": "ok",
+        "n_analyzed": len(merged),
+        "n_counties": n_counties,
+        "n_block_groups": n_bgs,
+    })
 
 
 @app.get("/api/all_points")
