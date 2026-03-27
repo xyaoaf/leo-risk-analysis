@@ -10,7 +10,6 @@ is cropped instead of re-fetched, saving 5-8s per point in AOI batches.
 import time
 import logging
 import numpy as np
-from pyproj import Transformer
 
 logger = logging.getLogger(__name__)
 

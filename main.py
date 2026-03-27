@@ -18,17 +18,15 @@ Usage:
 import json
 import logging
 import sys
-import time
 from pathlib import Path
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
-from matplotlib.colors import LightSource, Normalize
+from matplotlib.colors import LightSource
 from matplotlib.patches import Polygon as MplPolygon, Rectangle
 from matplotlib.collections import PatchCollection
 

@@ -49,7 +49,6 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 

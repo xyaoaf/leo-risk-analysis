@@ -20,7 +20,6 @@ import logging
 import os
 import sys
 import time
-import traceback
 import urllib.request
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -139,7 +138,11 @@ def _worker(args):
     # Ensure PROJ database is found in spawned worker processes
     import os
     if "PROJ_DATA" not in os.environ:
-        os.environ["PROJ_DATA"] = "/opt/miniconda3/envs/cs378/share/proj"
+        import sys
+        conda_prefix = os.environ.get("CONDA_PREFIX", sys.prefix)
+        proj_path = os.path.join(conda_prefix, "share", "proj")
+        if os.path.isdir(proj_path):
+            os.environ["PROJ_DATA"] = proj_path
     # Import inside worker — each process gets its own module state
     from feasibility import analyze_location
 
