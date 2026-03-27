@@ -48,6 +48,14 @@ outputs/batch/batch_results_incremental.csv
 # Dataset — proprietary / large input files
 DATA_CHALLENGE_50.csv
 
+# Challenge50 output maps (tracked)
+!outputs/challenge50
+outputs/challenge50/*
+!outputs/challenge50/mapB_nc_density.png
+
+# Video recordings (upload to Google Drive separately)
+2026-03-26*/
+
 # macOS
 .DS_Store
 .AppleDouble

@@ -717,31 +717,68 @@ async def analyze_bbox(req: BboxRequest):
         (df["longitude"] >= req.lon_min) & (df["longitude"] <= req.lon_max)
     )
     subset = df[mask].copy()
-    n = len(subset)
+    n_total = len(subset)
 
-    if n == 0:
+    if n_total == 0:
         return JSONResponse(content={"status": "empty", "n_points": 0, "results": []})
 
-    if n > AOI_CONFIRMATION_THRESHOLD and not req.confirmed:
-        # Use HTTP 200 so the frontend can inspect status field without re-parsing 202
+    # --- Skip already-analyzed points ---
+    precomputed = _load_precomputed()
+    analyzed_ids = {str(r.get("location_id", "")) for r in precomputed}
+    already_done = subset["location_id"].astype(str).isin(analyzed_ids).sum()
+    subset = subset[~subset["location_id"].astype(str).isin(analyzed_ids)]
+    n_remaining = len(subset)
+
+    if n_remaining == 0:
+        return JSONResponse(content={
+            "status": "empty",
+            "n_points": 0,
+            "n_total": int(n_total),
+            "n_already_analyzed": int(already_done),
+            "message": f"All {n_total:,} points in this area are already analyzed.",
+        })
+
+    if n_remaining > AOI_CONFIRMATION_THRESHOLD and not req.confirmed:
+        n_sampled = AOI_CONFIRMATION_THRESHOLD
         return JSONResponse(
             status_code=200,
             content={
                 "status":    "confirmation_required",
-                "n_points":  n,
+                "n_total":   int(n_total),
+                "n_already_analyzed": int(already_done),
+                "n_remaining": int(n_remaining),
+                "n_sampled":  n_sampled,
                 "threshold": AOI_CONFIRMATION_THRESHOLD,
                 "message":   (
-                    f"This AOI contains {n:,} points (~{n * 30 // 60} min). "
-                    f"Re-submit with confirmed=true to proceed."
+                    f"{n_total:,} points in AOI · {already_done:,} already analyzed · "
+                    f"{n_remaining:,} remaining.\n"
+                    f"Will process a spatially uniform sample of {n_sampled} "
+                    f"(~{n_sampled * 30 // 60} min)."
                 ),
             },
         )
 
-    # Cap to threshold
-    if n > AOI_CONFIRMATION_THRESHOLD:
-        subset = subset.sample(AOI_CONFIRMATION_THRESHOLD, random_state=42)
-        n = AOI_CONFIRMATION_THRESHOLD
-        logger.info(f"[api/analyze_bbox] Sampled {AOI_CONFIRMATION_THRESHOLD} pts")
+    # Cap to threshold with spatially uniform sampling (grid-based)
+    if n_remaining > AOI_CONFIRMATION_THRESHOLD:
+        # Spatially stratified sample: divide AOI into grid cells, sample proportionally
+        n_target = AOI_CONFIRMATION_THRESHOLD
+        subset = subset.copy()
+        subset["_grid_lat"] = (subset["latitude"]  * 50).astype(int)  # ~2km grid
+        subset["_grid_lon"] = (subset["longitude"] * 50).astype(int)
+        subset["_grid"] = subset["_grid_lat"].astype(str) + "_" + subset["_grid_lon"].astype(str)
+        # Sample proportionally from each grid cell
+        sampled = subset.groupby("_grid", group_keys=False)[subset.columns].apply(
+            lambda g: g.sample(min(len(g), max(1, int(n_target * len(g) / n_remaining))),
+                               random_state=42)
+        )
+        # If proportional rounding gives fewer, top up randomly
+        if len(sampled) < n_target:
+            remaining = subset[~subset.index.isin(sampled.index)]
+            extra = remaining.sample(min(len(remaining), n_target - len(sampled)), random_state=42)
+            sampled = pd.concat([sampled, extra])
+        subset = sampled.head(n_target).drop(columns=["_grid_lat", "_grid_lon", "_grid"])
+        logger.info(f"[api/analyze_bbox] Spatially sampled {len(subset)} pts from {n_remaining}")
+    n = len(subset)
 
     job_id = uuid.uuid4().hex[:12]
     _jobs[job_id] = {"status": "running", "total": n, "completed": 0}
@@ -750,7 +787,12 @@ async def analyze_bbox(req: BboxRequest):
 
     return JSONResponse(
         status_code=202,
-        content={"job_id": job_id, "status": "running", "n_points": n},
+        content={
+            "job_id": job_id, "status": "running", "n_points": n,
+            "n_total": int(n_total),
+            "n_already_analyzed": int(already_done),
+            "n_remaining": int(n_remaining),
+        },
     )
 
 

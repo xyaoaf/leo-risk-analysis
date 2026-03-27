@@ -203,8 +203,9 @@
       <div class="leg-row"><div class="leg-dot" style="background:#e74c3c"></div> Critical (70-100)</div>
       <hr>
       <div class="leg-row"><div class="leg-dot leg-dot-sm" style="background:#fff;border:1.5px solid #6b7280"></div> Unanalyzed</div>
-      <div class="leg-row"><div class="leg-dot" style="background:#2ecc71;border-radius:2px;width:14px;height:9px"></div> High pass rate</div>
-      <div class="leg-row"><div class="leg-dot" style="background:#e74c3c;border-radius:2px;width:14px;height:9px"></div> Low pass rate</div>
+      <div class="leg-section">Choropleth (pass rate)</div>
+      <div style="height:10px;border-radius:3px;background:linear-gradient(to right,rgb(231,76,60),rgb(230,126,34),rgb(241,196,15),rgb(46,204,113));margin:2px 0"></div>
+      <div style="display:flex;justify-content:space-between;font-size:8px;color:#9ca3af"><span>0%</span><span>50%</span><span>100%</span></div>
       <div id="legend-mode">County choropleth</div>
     </div>
 
@@ -277,13 +278,25 @@ const ZOOM_BG     = 12;   // 9-12: block group choropleth; >= 12: individual dot
 function tierColor(tier) { return TIER_COLOR[tier] || '#6b7280'; }
 
 function passRateColor(pctFeasible) {
-  // Green (high pass) -> Yellow -> Red (low pass)
+  // Continuous gradient: red(0%) → orange(33%) → yellow(66%) → green(100%)
   if (pctFeasible == null || isNaN(pctFeasible)) return '#374151';
-  const p = Math.max(0, Math.min(100, pctFeasible));
-  if (p >= 75) return '#2ecc71';
-  if (p >= 50) return '#f39c12';
-  if (p >= 25) return '#e67e22';
-  return '#e74c3c';
+  const t = Math.max(0, Math.min(1, pctFeasible / 100));
+  // Stops: 0→[231,76,60], 0.33→[230,126,34], 0.66→[241,196,15], 1→[46,204,113]
+  const stops = [
+    [0,    231, 76, 60],
+    [0.33, 230,126, 34],
+    [0.66, 241,196, 15],
+    [1,    46, 204,113],
+  ];
+  let i = 0;
+  while (i < stops.length - 2 && t > stops[i + 1][0]) i++;
+  const [t0, r0, g0, b0] = stops[i];
+  const [t1, r1, g1, b1] = stops[i + 1];
+  const f = (t - t0) / (t1 - t0);
+  const r = Math.round(r0 + f * (r1 - r0));
+  const g = Math.round(g0 + f * (g1 - g0));
+  const b = Math.round(b0 + f * (b1 - b0));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
 // ===========================================================================
@@ -762,21 +775,27 @@ async function runAoiBatch(bbox) {
     if (data.status === 'confirmation_required') {
       hideSpinner();
       pendingBbox = Object.assign({}, bbox, { confirmed: true });
-      document.getElementById('confirm-msg').textContent = data.message;
+      var msg = data.n_total + ' points in AOI';
+      if (data.n_already_analyzed > 0) msg += ' · ' + data.n_already_analyzed + ' already analyzed';
+      msg += ' · ' + data.n_remaining + ' remaining';
+      msg += '\nWill process a spatially uniform sample of ' + data.n_sampled + ' (~' + Math.round(data.n_sampled * 30 / 60) + ' min).';
+      document.getElementById('confirm-msg').textContent = msg;
       document.getElementById('confirm-dialog').classList.add('active');
       return;
     }
     if (data.status === 'empty') {
-      setStatus('No data points in selected area.');
+      var emptyMsg = data.message || 'No data points in selected area.';
+      setStatus(emptyMsg);
       hideSpinner();
       return;
     }
 
     const job_id = data.job_id, n_points = data.n_points;
-    showSpinner('AOI batch: 0 / ' + n_points + ' points...');
+    var skipMsg = data.n_already_analyzed > 0 ? ' (' + data.n_already_analyzed + ' skipped, already analyzed)' : '';
+    showSpinner('AOI batch: 0 / ' + n_points + ' points...' + skipMsg);
     const job = await pollJob(job_id, 3000, function(j) {
-      showSpinner('AOI batch: ' + (j.completed || 0) + ' / ' + (j.total || n_points) + ' points...');
-      setStatus('AOI batch: ' + (j.completed || 0) + '/' + (j.total || n_points) + ' complete...');
+      showSpinner('AOI batch: ' + (j.completed || 0) + ' / ' + (j.total || n_points) + ' points...' + skipMsg);
+      setStatus('AOI batch: ' + (j.completed || 0) + '/' + (j.total || n_points) + ' complete' + skipMsg);
     });
     if (job.status === 'error') throw new Error(job.error || 'Batch failed');
     setStatus('AOI batch: ' + job.n_points + ' points complete');

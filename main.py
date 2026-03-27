@@ -395,9 +395,10 @@ def _plot_polar_panel(fig, gs_pos, hz_far, hz_canopy, hz_full, n_az,
     """Polar horizon profile panel with incremental fills per obstruction type."""
     ax = fig.add_subplot(gs_pos, polar=True, facecolor="#1a1a2e")
 
-    angles_rad = np.linspace(0, 2 * np.pi, n_az, endpoint=False)
-    # Convert compass angle (CW from N) → math angle (CCW from E) for polar plot
-    theta = (np.pi / 2 - angles_rad) % (2 * np.pi)
+    # Azimuths are in compass convention: 0=N, 90=E, 180=S, 270=W (clockwise).
+    # matplotlib's set_theta_zero_location("N") + set_theta_direction(-1)
+    # handles the visual mapping, so we pass compass radians directly.
+    theta = np.linspace(0, 2 * np.pi, n_az, endpoint=False)
 
     # Compute FOV-blocked percentages (FOV = ±50° around North, threshold = 25°)
     threshold_deg = 25.0
@@ -456,9 +457,9 @@ def _plot_polar_panel(fig, gs_pos, hz_far, hz_canopy, hz_full, n_az,
     ax.text(np.pi / 4, threshold_deg + 2, f"{threshold_deg:.0f}°",
             color="white", fontsize=6)
 
-    # FOV arc shading (±50° around N)
-    fov_az = np.linspace(-50, 50, 40)
-    fov_th = (np.pi / 2 - np.radians(fov_az)) % (2 * np.pi)
+    # FOV arc shading (±50° around North = azimuths 310°–360° and 0°–50°)
+    fov_az = np.linspace(-50, 50, 80)  # compass degrees around North
+    fov_th = np.radians(fov_az) % (2 * np.pi)  # compass radians (let matplotlib handle display)
     ax.fill_between(fov_th, 0, 4, color="#4a90d9", alpha=0.15)
 
     ax.set_theta_zero_location("N")
